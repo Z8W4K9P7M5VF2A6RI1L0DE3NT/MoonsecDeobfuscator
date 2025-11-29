@@ -1,7 +1,7 @@
 using Discord;
 using Discord.WebSocket;
-using MoonsecDeobfuscator.Deobfuscation;
 using System.Text.RegularExpressions;
+using MoonsecDeobfuscator.Deobfuscation;
 
 namespace MoonsecDeobfuscator
 {
@@ -9,17 +9,27 @@ namespace MoonsecDeobfuscator
     {
         private static DiscordSocketClient _client;
         private static ulong TargetChannelId = 1444258745336070164;
-        private static HashSet<ulong> _handledMessages = new HashSet<ulong>();
+        private static HashSet<ulong> _handled = new HashSet<ulong>();
 
         public static async Task Main(string[] args)
         {
             var token = Environment.GetEnvironmentVariable("BOT_TOKEN");
-            if (string.IsNullOrWhiteSpace(token)) return;
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                Console.WriteLine("BOT_TOKEN env missing");
+                return;
+            }
 
             _client = new DiscordSocketClient(new DiscordSocketConfig
             {
                 GatewayIntents = GatewayIntents.All
             });
+
+            _client.Log += msg =>
+            {
+                Console.WriteLine(msg.ToString());
+                return Task.CompletedTask;
+            };
 
             _client.Ready += async () =>
             {
@@ -31,44 +41,112 @@ namespace MoonsecDeobfuscator
 
             await _client.LoginAsync(TokenType.Bot, token);
             await _client.StartAsync();
+
             await Task.Delay(-1);
         }
 
-        private static async Task HandleMessage(SocketMessage message)
+        private static async Task HandleMessage(SocketMessage msg)
         {
-            if (message.Author.IsBot) return;
-            if (_handledMessages.Contains(message.Id)) return;
-            _handledMessages.Add(message.Id);
+            if (msg.Author.IsBot) return;
+            if (_handled.Contains(msg.Id)) return;
+            _handled.Add(msg.Id);
 
-            if (message.Attachments.Count == 0) return;
+            bool okChannel = msg.Channel.Id == TargetChannelId;
+            bool okDM = msg.Channel is SocketDMChannel;
 
-            bool inChannel = message.Channel.Id == TargetChannelId;
-            bool inDM = message.Channel is SocketDMChannel;
+            if (!okChannel && !okDM) return;
 
-            if (!inChannel && !inDM) return;
+            string text = msg.Content ?? "";
 
-            var file = message.Attachments.First();
-            var tempInput = Path.GetTempFileName() + ".lua";
-            var tempOutput = Path.GetTempFileName() + ".lua";
+            // detect loadstring URL patterns
+            string url = null;
 
-            using (var client = new HttpClient())
+            var r1 = Regex.Match(text, @"loadstring\s*\(\s*game:HttpGet\s*\(\s*[""'](.*?)[""']\s*\)");
+            var r2 = Regex.Match(text, @"loadstring\s*\(\s*request\s*\(\s*\{.*?Url\s*=\s*[""'](.*?)[""'].*?\}\s*\)");
+
+            if (r1.Success) url = r1.Groups[1].Value;
+            if (r2.Success) url = r2.Groups[1].Value;
+
+            // loadstring URL deobfuscation
+            if (url != null)
             {
-                var data = await client.GetByteArrayAsync(file.Url);
-                await File.WriteAllBytesAsync(tempInput, data);
+                var tempIn = Path.GetTempFileName() + ".lua";
+                var tempOut = Path.GetTempFileName() + ".lua";
+
+                using (var client = new HttpClient())
+                {
+                    try
+                    {
+                        var data = await client.GetByteArrayAsync(url);
+                        await File.WriteAllBytesAsync(tempIn, data);
+                    }
+                    catch
+                    {
+                        await msg.Channel.SendMessageAsync("invalid url");
+                        return;
+                    }
+                }
+
+                await ProcessAndSend(tempIn, tempOut, msg);
+                return;
             }
 
-            string raw = File.ReadAllText(tempInput);
-            raw = Regex.Replace(raw, @"--.*?$", "", RegexOptions.Multiline);
-            raw = Regex.Replace(raw, @"/\*[\s\S]*?\*/", "");
+            // file attachments
+            if (msg.Attachments.Count > 0)
+            {
+                var file = msg.Attachments.First();
+                var tempIn = Path.GetTempFileName() + ".lua";
+                var tempOut = Path.GetTempFileName() + ".lua";
 
-            var deobf = new Deobfuscator().Deobfuscate(raw);
+                using (var client = new HttpClient())
+                {
+                    try
+                    {
+                        var data = await client.GetByteArrayAsync(file.Url);
+                        await File.WriteAllBytesAsync(tempIn, data);
+                    }
+                    catch
+                    {
+                        await msg.Channel.SendMessageAsync("failed to download file");
+                        return;
+                    }
+                }
 
-            string final = "-- file deobfuscated by galactic services\n\n" + deobf;
+                await ProcessAndSend(tempIn, tempOut, msg);
+                return;
+            }
+        }
 
-            File.WriteAllText(tempOutput, final);
+        private static async Task ProcessAndSend(string tempIn, string tempOut, SocketMessage msg)
+        {
+            string code = File.ReadAllText(tempIn);
 
-            using var fs = new FileStream(tempOutput, FileMode.Open, FileAccess.Read);
-            await message.Channel.SendFileAsync(fs, "deobf.lua");
+            code = Regex.Replace(code, @"--.*?$", "", RegexOptions.Multiline);
+            code = Regex.Replace(code, @"/\*[\s\S]*?\*/", "");
+
+            var result = new Deobfuscator().Deobfuscate(code);
+
+            string luaText = "";
+            if (result is string s) luaText = s;
+            else if (result is byte[] b) luaText = System.Text.Encoding.UTF8.GetString(b);
+            else luaText = result?.ToString() ?? "";
+
+            if (string.IsNullOrWhiteSpace(luaText))
+                luaText = "-- failed to extract";
+
+            string final = "-- file deobfuscated by galactic services\n\n" + luaText;
+
+            File.WriteAllText(tempOut, final);
+
+            try
+            {
+                using var fs = new FileStream(tempOut, FileMode.Open, FileAccess.Read);
+                await msg.Channel.SendFileAsync(fs, "deobf.lua");
+            }
+            catch
+            {
+                await msg.Channel.SendMessageAsync("failed to send file");
+            }
         }
     }
 }
