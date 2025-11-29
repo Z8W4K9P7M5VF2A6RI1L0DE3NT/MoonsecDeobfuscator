@@ -25,9 +25,9 @@ namespace MoonsecDeobfuscator
                 GatewayIntents = GatewayIntents.All
             });
 
-            _client.Log += msg =>
+            _client.Log += m =>
             {
-                Console.WriteLine(msg.ToString());
+                Console.WriteLine(m.ToString());
                 return Task.CompletedTask;
             };
 
@@ -38,10 +38,8 @@ namespace MoonsecDeobfuscator
             };
 
             _client.MessageReceived += HandleMessage;
-
             await _client.LoginAsync(TokenType.Bot, token);
             await _client.StartAsync();
-
             await Task.Delay(-1);
         }
 
@@ -53,12 +51,9 @@ namespace MoonsecDeobfuscator
 
             bool okChannel = msg.Channel.Id == TargetChannelId;
             bool okDM = msg.Channel is SocketDMChannel;
-
             if (!okChannel && !okDM) return;
 
             string text = msg.Content ?? "";
-
-            // detect loadstring URL patterns
             string url = null;
 
             var r1 = Regex.Match(text, @"loadstring\s*\(\s*game:HttpGet\s*\(\s*[""'](.*?)[""']\s*\)");
@@ -67,7 +62,6 @@ namespace MoonsecDeobfuscator
             if (r1.Success) url = r1.Groups[1].Value;
             if (r2.Success) url = r2.Groups[1].Value;
 
-            // loadstring URL deobfuscation
             if (url != null)
             {
                 var tempIn = Path.GetTempFileName() + ".lua";
@@ -91,7 +85,6 @@ namespace MoonsecDeobfuscator
                 return;
             }
 
-            // file attachments
             if (msg.Attachments.Count > 0)
             {
                 var file = msg.Attachments.First();
@@ -103,6 +96,54 @@ namespace MoonsecDeobfuscator
                     try
                     {
                         var data = await client.GetByteArrayAsync(file.Url);
+                        await File.WriteAllBytesAsync(tempIn, data);
+                    }
+                    catch
+                    {
+                        await msg.Channel.SendMessageAsync("failed to download file");
+                        return;
+                    }
+                }
+
+                await ProcessAndSend(tempIn, tempOut, msg);
+                return;
+            }
+        }
+
+        private static async Task ProcessAndSend(string tempIn, string tempOut, SocketMessage msg)
+        {
+            string code = File.ReadAllText(tempIn);
+
+            code = Regex.Replace(code, @"--.*?$", "", RegexOptions.Multiline);
+            code = Regex.Replace(code, @"/\*[\s\S]*?\*/", "");
+
+            object raw = new Deobfuscator().Deobfuscate(code);
+
+            string luaText = raw switch
+            {
+                string s => s,
+                byte[] b => System.Text.Encoding.UTF8.GetString(b),
+                _ => raw?.ToString() ?? ""
+            };
+
+            if (string.IsNullOrWhiteSpace(luaText))
+                luaText = "-- failed to extract";
+
+            string final = "-- file deobfuscated by galactic services\n\n" + luaText;
+            File.WriteAllText(tempOut, final);
+
+            try
+            {
+                using var fs = new FileStream(tempOut, FileMode.Open, FileAccess.Read);
+                await msg.Channel.SendFileAsync(fs, "deobf.lua");
+            }
+            catch
+            {
+                await msg.Channel.SendMessageAsync("failed to send file");
+            }
+        }
+    }
+}                        var data = await client.GetByteArrayAsync(file.Url);
                         await File.WriteAllBytesAsync(tempIn, data);
                     }
                     catch
