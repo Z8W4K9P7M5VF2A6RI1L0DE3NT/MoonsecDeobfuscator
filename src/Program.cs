@@ -10,7 +10,6 @@ namespace MoonsecDeobfuscator
     public static class Program
     {
         private static DiscordSocketClient _client;
-
         private static readonly ulong TargetChannelId = 1444258745336070164;
 
         private static long LastSent = 0;
@@ -28,12 +27,6 @@ namespace MoonsecDeobfuscator
             {
                 GatewayIntents = GatewayIntents.All
             });
-
-            _client.Log += msg =>
-            {
-                Console.WriteLine(msg.ToString());
-                return Task.CompletedTask;
-            };
 
             _client.MessageReceived += HandleMessage;
 
@@ -53,6 +46,7 @@ namespace MoonsecDeobfuscator
             if (!inChannel && !inDM)
                 return;
 
+            // delete non-file messages inside target channel
             if (inChannel && msg.Attachments.Count == 0)
             {
                 _ = msg.DeleteAsync();
@@ -61,53 +55,92 @@ namespace MoonsecDeobfuscator
 
             if (msg.Attachments.Count == 0) return;
 
+            // cooldown
             if (Stopwatch.GetTimestamp() - LastSent < TimeSpan.FromSeconds(5).Ticks)
                 return;
 
             LastSent = Stopwatch.GetTimestamp();
 
+            // download file
             var att = msg.Attachments.First();
             var tempInput = Path.GetTempFileName() + ".lua";
-            var data = await new HttpClient().GetByteArrayAsync(att.Url);
-            await File.WriteAllBytesAsync(tempInput, data);
+            var fileBytes = await new HttpClient().GetByteArrayAsync(att.Url);
+            await File.WriteAllBytesAsync(tempInput, fileBytes);
 
             var sw = Stopwatch.StartNew();
 
-            var deob = new Deobfuscator().Deobfuscate(File.ReadAllText(tempInput));
+            // run deobfuscator
+            var raw = File.ReadAllText(tempInput);
+            var output = new Deobfuscator().Deobfuscate(raw);
 
-            // bytecode serialization
-            var bytecodePath = RandomName(9) + ".luac";
-            using (var fs = new FileStream(bytecodePath, FileMode.Create))
-            using (var ser = new Serializer(fs))
-                ser.Serialize(deob);
+            // output CLEAN TEXT
+            string cleanText;
 
-            // send bytecode to luadec
-            var luaClean = await UploadBytecode(bytecodePath);
+            if (output is Function fn)
+            {
+                // serialize bytecode
+                var byteFile = RandomName(9) + ".luac";
+                using (var fs = new FileStream(byteFile, FileMode.Create))
+                using (var ser = new Serializer(fs))
+                    ser.Serialize(fn);
 
-            // strip all comments
-            luaClean = RemoveComments(luaClean);
+                // upload bytecode to luadec.metaworm.site
+                cleanText = await UploadBytecode(byteFile);
 
-            // prepend custom header
-            luaClean = "-- deobfuscated by galactic services join now https://discord.gg/angmZQJC8a\n\n" + luaClean;
+                // strip comments
+                cleanText = RemoveComments(cleanText);
 
-            // save final file
-            var luauOut = RandomName(8) + ".luau";
-            File.WriteAllText(luauOut, luaClean);
+                // prepend header
+                cleanText = "-- deobfuscated by galactic services join now https://discord.gg/angmZQJC8a\n\n" + cleanText;
 
-            sw.Stop();
+                // generate output name
+                var luaOut = RandomName(8) + ".luau";
 
-            await msg.Channel.SendMessageAsync(
-                $"done in {sw.ElapsedTicks}ns\n" +
-                $"deobfuscated file: {luauOut}\n" +
-                $"bytecode file: {bytecodePath}\n" +
-                $"here is bytecode aswell to see original code paste it into luadec.metaworm.site"
-            );
+                // save clean file
+                File.WriteAllText(luaOut, cleanText);
 
-            using (var fs1 = new FileStream(luauOut, FileMode.Open))
-                await msg.Channel.SendFileAsync(fs1, luauOut);
+                sw.Stop();
+                long nanos = (long)(sw.Elapsed.TotalMilliseconds * 1_000_000);
 
-            using (var fs2 = new FileStream(bytecodePath, FileMode.Open))
-                await msg.Channel.SendFileAsync(fs2, bytecodePath);
+                // send message
+                await msg.Channel.SendMessageAsync(
+                    $"yo finished in {nanos}ns\n" +
+                    $"deobfuscated file: {luaOut}\n" +
+                    $"bytecode file: {byteFile}\n" +
+                    $"here is bytecode aswell to see original code paste it into luadec.metaworm.site"
+                );
+
+                // send files
+                using (var fs1 = new FileStream(luaOut, FileMode.Open))
+                    await msg.Channel.SendFileAsync(fs1, luaOut);
+                using (var fs2 = new FileStream(byteFile, FileMode.Open))
+                    await msg.Channel.SendFileAsync(fs2, byteFile);
+
+                return;
+            }
+            else
+            {
+                // the result is NOT bytecode output — only a normal deob string
+                cleanText = output.ToString();
+
+                cleanText = RemoveComments(cleanText);
+                cleanText = "-- deobfuscated by galactic services join now https://discord.gg/angmZQJC8a\n\n" + cleanText;
+
+                var luaOut = RandomName(8) + ".luau";
+                File.WriteAllText(luaOut, cleanText);
+
+                sw.Stop();
+                long nanos = (long)(sw.Elapsed.TotalMilliseconds * 1_000_000);
+
+                await msg.Channel.SendMessageAsync(
+                    $"yo finished in {nanos}ns\n" +
+                    $"deobfuscated file: {luaOut}\n" +
+                    $"no bytecode generated cause file wasnt function bytecode"
+                );
+
+                using (var fs = new FileStream(luaOut, FileMode.Open))
+                    await msg.Channel.SendFileAsync(fs, luaOut);
+            }
         }
 
         private static async Task<string> UploadBytecode(string path)
@@ -132,23 +165,8 @@ namespace MoonsecDeobfuscator
         private static string RandomName(int len)
         {
             const string chars = "abcdefghijklmnopqrstuvwxyz";
-            return new string(Enumerable.Range(0, len).Select(_ => chars[RandomNumberGenerator.GetInt32(chars.Length)]).ToArray());
-        }
-    }
-}
-            string msgText =
-                $"yo deobfuscated in {nanos} nanoseconds\n" +
-                $"deobfuscated file name: {luaName}\n" +
-                $"bytecode file name: {byteName}\n" +
-                $"to view reconstructed source paste bytecode at https://luadec.metaworm.site";
-
-            await message.Channel.SendMessageAsync(msgText);
-
-            using (var fs1 = new FileStream(finalLuaPath, FileMode.Open, FileAccess.Read))
-                await message.Channel.SendFileAsync(fs1, luaName);
-
-            using (var fs2 = new FileStream(finalBytePath, FileMode.Open, FileAccess.Read))
-                await message.Channel.SendFileAsync(fs2, byteName);
+            return new string(Enumerable.Range(0, len)
+                .Select(_ => chars[RandomNumberGenerator.GetInt32(chars.Length)]).ToArray());
         }
     }
 }
