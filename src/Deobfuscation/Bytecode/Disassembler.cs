@@ -7,28 +7,22 @@ using MoonsecDeobfuscator.Bytecode.Models;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
-public class LegendDecompiler(Function rootFunction)
+public class Disassembler(Function rootFunction)
 {
     private readonly StringBuilder _builder = new();
     private int _indent = 0;
     private int _v_u_counter = 1;
     
-    // Maps original registers/upvalues to persistent v_u_ names
+    // Tracks global "v_u_" names for specific objects/upvalues
     private readonly Dictionary<string, string> _nameMap = new();
 
     public string Decompile()
     {
         var stopwatch = Stopwatch.StartNew();
-        
-        // Build the AST starting from the root
         var ast = BuildFunctionNode(rootFunction, false, "root");
-        
         stopwatch.Stop();
 
-        // Header as requested
-        _builder.AppendLine($"-- MoonSecV3 Decompiled by Enchanted Hub");
-        _builder.AppendLine($"-- Time taken: {stopwatch.Elapsed.TotalMilliseconds:F4} ms\n");
-
+        // No header in the output body for the snippet look
         PrintNode(ast);
         return _builder.ToString();
     }
@@ -36,9 +30,7 @@ public class LegendDecompiler(Function rootFunction)
     private string GetVUName(string id)
     {
         if (!_nameMap.ContainsKey(id))
-        {
             _nameMap[id] = $"v_u_{_v_u_counter++}";
-        }
         return _nameMap[id];
     }
 
@@ -46,7 +38,9 @@ public class LegendDecompiler(Function rootFunction)
     {
         var statements = new List<AstNode>();
         var virtualStack = new string[256];
+        var usedUpvalues = new HashSet<string>();
 
+        // Local helper for Register/Constant resolution
         string RK(int val) => val >= 256 ? GetConst(val - 256, function) : (virtualStack[val] ?? $"v{val}");
 
         for (int i = 0; i < function.Instructions.Count; i++)
@@ -60,72 +54,79 @@ public class LegendDecompiler(Function rootFunction)
                     break;
 
                 case OpCode.GetGlobal:
-                    string gName = GetConst(ins.B, function).Replace("\"", "");
-                    virtualStack[ins.A] = gName;
+                    virtualStack[ins.A] = GetConst(ins.B, function).Replace("\"", "");
                     break;
 
                 case OpCode.GetUpval:
-                    // Upvalues use the persistent v_u_ naming
-                    virtualStack[ins.A] = GetVUName($"up_{ins.B}");
+                    string upName = GetVUName($"up_{ins.B}");
+                    usedUpvalues.Add(upName); // Track for the comment block
+                    virtualStack[ins.A] = upName;
                     break;
 
                 case OpCode.GetTable:
-                    string table = virtualStack[ins.B] ?? $"v{ins.B}";
-                    string key = RK(ins.C);
-                    // Dot notation reconstruction
-                    virtualStack[ins.A] = key.StartsWith("\"") ? $"{table}.{key.Trim('"')}" : $"{table}[{key}]";
+                    {
+                        string table = virtualStack[ins.B] ?? $"v{ins.B}";
+                        string key = RK(ins.C);
+                        // Dot notation cleanup: v28.Workspace
+                        string index = key.StartsWith("\"") ? $".{key.Trim('"')}" : $"[{key}]";
+                        virtualStack[ins.A] = $"{table}{index}";
+                    }
                     break;
 
                 case OpCode.SetTable:
-                    string st = virtualStack[ins.A] ?? $"v{ins.A}";
-                    string sk = RK(ins.B);
-                    string sv = RK(ins.C);
-                    string target = sk.StartsWith("\"") ? $"{st}.{sk.Trim('"')}" : $"{st}[{sk}]";
-                    statements.Add(new AssignNode(target, sv, false));
+                    {
+                        string st = virtualStack[ins.A] ?? $"v{ins.A}";
+                        string sk = RK(ins.B);
+                        string sv = RK(ins.C);
+                        string target = sk.StartsWith("\"") ? $"{st}.{sk.Trim('"')}" : $"{st}[{sk}]";
+                        statements.Add(new AssignNode(target, sv, false));
+                    }
                     break;
 
                 case OpCode.Call:
-                    int argCount = ins.B > 0 ? ins.B - 1 : 0;
-                    var args = new List<string>();
-                    for (int j = 1; j <= argCount; j++) 
-                        args.Add(virtualStack[ins.A + j] ?? $"v{ins.A + j}");
-
-                    string fn = virtualStack[ins.A] ?? $"v{ins.A}";
-                    
-                    // Colon Call Reconstruction (e.g., game:GetService)
-                    if (fn.Contains(".") && args.Count > 0)
                     {
-                        string obj = fn.Split('.')[0];
-                        if (args[0] == obj)
-                        {
-                            fn = fn.Replace(".", ":");
-                            args.RemoveAt(0);
-                        }
-                    }
+                        int argCount = ins.B > 0 ? ins.B - 1 : 0;
+                        var args = new List<string>();
+                        for (int j = 1; j <= argCount; j++) 
+                            args.Add(virtualStack[ins.A + j] ?? $"v{ins.A + j}");
 
-                    string callExpr = $"{fn}({string.Join(", ", args)})";
-                    if (ins.C > 1) virtualStack[ins.A] = callExpr;
-                    else statements.Add(new RawNode(callExpr));
+                        string fn = virtualStack[ins.A] ?? $"v{ins.A}";
+                        
+                        // Colon Call Reconstruction: v19:CreateTab
+                        if (fn.Contains(".") && args.Count > 0)
+                        {
+                            string obj = fn.Split('.')[0];
+                            if (args[0] == obj) {
+                                fn = fn.Replace(".", ":");
+                                args.RemoveAt(0);
+                            }
+                        }
+
+                        string callExpr = $"{fn}({string.Join(", ", args)})";
+                        // If C > 1, it's a value (like CreateWindow result)
+                        if (ins.C > 1) virtualStack[ins.A] = callExpr;
+                        else statements.Add(new RawNode(callExpr));
+                    }
                     break;
 
                 case OpCode.Closure:
-                    // Identify internal functions as v_u_ names
                     string closureId = GetVUName($"func_{ins.B}");
                     var child = BuildFunctionNode(function.Functions[ins.B], true, closureId);
                     
+                    // In your example, if a register is assigned a function, it's 'local function name()'
                     statements.Add(new RawNode($"local function {closureId}()"));
                     statements.Add(child);
                     virtualStack[ins.A] = closureId;
                     break;
 
                 case OpCode.Jmp:
+                    // Simple Control Flow: While/If detection
                     if (ins.B < 0) statements.Add(new RawNode("while true do"));
                     else statements.Add(new RawNode("end"));
                     break;
 
                 case OpCode.Return:
-                    if (ins.B > 1)
-                    {
+                    if (ins.B > 1) {
                         var rets = new List<string>();
                         for (int j = 0; j < ins.B - 1; j++) rets.Add(virtualStack[ins.A + j]);
                         statements.Add(new ReturnNode(rets));
@@ -134,7 +135,9 @@ public class LegendDecompiler(Function rootFunction)
             }
         }
 
-        return new FunctionNode(funcName, new Block(statements), isAnonymous);
+        var node = new FunctionNode(funcName, new Block(statements), isAnonymous);
+        node.UpvalueRefs.AddRange(usedUpvalues);
+        return node;
     }
 
     private string GetConst(int idx, Function f)
@@ -154,8 +157,12 @@ public class LegendDecompiler(Function rootFunction)
         switch (node)
         {
             case FunctionNode f:
-                if (f.IsAnonymous && f.Name != "root") {
+                if (f.Name != "root") {
                     _indent++;
+                    // Print the Upvalue Comment Block like your example: -- upvalues: (ref) v_u_2
+                    if (f.UpvalueRefs.Count > 0)
+                        _builder.AppendLine($"{tabs}\t-- upvalues: (ref) {string.Join(", ", f.UpvalueRefs)}");
+                    
                     foreach (var s in f.Body.Statements) PrintNode(s);
                     _indent--;
                     _builder.AppendLine($"{tabs}end");
@@ -176,9 +183,13 @@ public class LegendDecompiler(Function rootFunction)
     }
 }
 
+// Updated Records to support Upvalue tracking
 public abstract record AstNode;
 public record Block(List<AstNode> Statements) : AstNode;
 public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
 public record ReturnNode(List<string> Values) : AstNode;
 public record RawNode(string Code) : AstNode;
-public record FunctionNode(string Name, Block Body, bool IsAnonymous) : AstNode;
+public record FunctionNode(string Name, Block Body, bool IsAnonymous) : AstNode
+{
+    public List<string> UpvalueRefs { get; } = new();
+}
