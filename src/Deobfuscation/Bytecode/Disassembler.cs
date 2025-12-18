@@ -6,7 +6,6 @@ using System.Text;
 using System.Diagnostics;
 using MoonsecDeobfuscator.Bytecode.Models;
 
-// This alias ensures we use the version of Function from your Models
 using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
@@ -20,20 +19,14 @@ public class Disassembler(Function rootFunction)
     public string Disassemble()
     {
         var stopwatch = Stopwatch.StartNew();
-        
-        // Build AST - Root function starts at index 0
         var ast = BuildFunctionNode(rootFunction, isAnonymous: false, funcIndex: 0);
-        
         stopwatch.Stop();
 
-        // Watermark Header
-        _builder.AppendLine($"-- MoonSecV3 File Decompiled By Gemini. Time taken: {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
+        _builder.AppendLine($"-- MoonSecV3 File Decompiled By Gemini. Time: {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
         _builder.AppendLine();
 
-        // Print Structured Lua
         PrintFunctionNode(ast);
 
-        // Entry Point Execution
         if (!ast.IsAnonymous && !string.IsNullOrEmpty(ast.Name))
         {
             _builder.AppendLine($"\n{ast.Name}()");
@@ -108,27 +101,28 @@ public class Disassembler(Function rootFunction)
                     break;
 
                 case OpCode.Call:
-                    var args = Enumerable.Range(ins.A + 1, ins.B - 1).Select(Reg).ToList();
+                    // FIX: Ensure count (ins.B - 1) is never negative
+                    int argCount = Math.Max(0, ins.B - 1);
+                    var args = Enumerable.Range(ins.A + 1, argCount).Select(Reg).ToList();
                     statements.Add(new CallNode(Reg(ins.A), args));
                     break;
 
                 case OpCode.Closure:
-                    // Pass child index explicitly to BuildFunctionNode
                     var childFunc = BuildFunctionNode(function.Functions[ins.B], true, ins.B);
                     statements.Add(new AssignNode(target, "function()", isFirst));
                     statements.Add(childFunc);
                     break;
 
                 case OpCode.Return:
-                    statements.Add(new ReturnNode(Enumerable.Range(ins.A, ins.B - 1).Select(Reg).ToList()));
+                    // FIX: Ensure count (ins.B - 1) is never negative
+                    int retCount = Math.Max(0, ins.B - 1);
+                    statements.Add(new ReturnNode(Enumerable.Range(ins.A, retCount).Select(Reg).ToList()));
                     break;
             }
             declaredRegisters.Add(ins.A);
         }
 
         var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
-        
-        // FIXED: Using funcIndex parameter instead of missing property
         var fnName = isAnonymous ? "" : $"v{funcIndex + BASE_REGISTER_OFFSET}";
         return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
     }
@@ -168,7 +162,6 @@ public class Disassembler(Function rootFunction)
     private string FormatConst(Function f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
 }
 
-/* AST MODELS */
 public abstract record AstNode;
 public record Block(List<AstNode> Statements) : AstNode;
 public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
