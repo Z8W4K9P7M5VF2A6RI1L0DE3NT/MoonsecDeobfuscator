@@ -1,18 +1,17 @@
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
+using System.Linq;
+using System.Collections.Generic;
 using System.Diagnostics;
 using MoonsecDeobfuscator.Bytecode.Models;
 
-// This alias ensures we use the version of Function that has 'FunctionIndex'
-using Function = MoonsecDeobfuscator.Deobfuscation.Bytecode.Function;
+// Fix for CS0234: Forces the compiler to find the specific Deobfuscation Function class
+using DeobFunction = global::MoonsecDeobfuscator.Deobfuscation.Bytecode.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
-public class Disassembler(Function rootFunction)
+public class Disassembler(DeobFunction rootFunction)
 {
-    // Changed to 1 so registers start at v1
     private const int BASE_REGISTER_OFFSET = 1; 
     private readonly StringBuilder _builder = new();
     private int _indent = 0;
@@ -20,20 +19,14 @@ public class Disassembler(Function rootFunction)
     public string Disassemble()
     {
         var stopwatch = Stopwatch.StartNew();
-        
-        // Build AST
         var ast = BuildFunctionNode(rootFunction, isAnonymous: false);
-        
         stopwatch.Stop();
 
-        // Watermark Header
         _builder.AppendLine($"-- MoonSecV3 File Decompiled By Enchanted hub.  Time taken to decompile : {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
         _builder.AppendLine();
 
-        // Print Structured Lua
         PrintFunctionNode(ast);
 
-        // Entry Point Execution
         if (!ast.IsAnonymous && !string.IsNullOrEmpty(ast.Name))
         {
             _builder.AppendLine($"\n{ast.Name}()");
@@ -42,7 +35,7 @@ public class Disassembler(Function rootFunction)
         return _builder.ToString();
     }
 
-    private FunctionNode BuildFunctionNode(Function function, bool isAnonymous)
+    private FunctionNode BuildFunctionNode(DeobFunction function, bool isAnonymous)
     {
         var locals = new HashSet<int>();
         var usedRegs = new HashSet<int>();
@@ -50,11 +43,9 @@ public class Disassembler(Function rootFunction)
         var declaredRegisters = new HashSet<int>();
         var upvalueNames = new Dictionary<int, string>();
 
-        // Logic to determine if we use v or v_u_
         string Reg(int r) {
             usedRegs.Add(r);
             int displayR = r + BASE_REGISTER_OFFSET;
-            // Simple logic: if it's a higher register or flagged, use v_u_
             return (r < 2) ? $"v{displayR}" : $"v_u_{displayR}";
         }
 
@@ -85,41 +76,33 @@ public class Disassembler(Function rootFunction)
                 case OpCode.Move:
                     statements.Add(new AssignNode(target, Reg(ins.B), isFirst));
                     break;
-
                 case OpCode.LoadK:
                     statements.Add(new AssignNode(target, Const(ins.B), isFirst));
                     break;
-
                 case OpCode.GetGlobal:
                     string gName = ((StringConstant)function.Constants[ins.B]).Value;
                     statements.Add(new AssignNode(target, $"game:GetService(\"{gName}\")", false));
                     break;
-
                 case OpCode.GetUpval:
                     string upName = $"upvalue_{ins.B}";
                     upvalueNames[ins.B] = upName;
                     statements.Add(new AssignNode(target, upName, isFirst));
                     break;
-
                 case OpCode.SetUpval:
                     statements.Add(new AssignNode($"upvalue_{ins.B}", Reg(ins.A), false));
                     break;
-
                 case OpCode.GetTable:
                     statements.Add(new AssignNode(target, $"{Reg(ins.B)}.{RK(ins.C, function).Replace("\"", "")}", isFirst));
                     break;
-
                 case OpCode.Call:
                     var args = Enumerable.Range(ins.A + 1, ins.B - 1).Select(Reg).ToList();
                     statements.Add(new CallNode(Reg(ins.A), args));
                     break;
-
                 case OpCode.Closure:
                     var childFunc = BuildFunctionNode(function.Functions[ins.B], true);
                     statements.Add(new AssignNode(target, "function()", isFirst));
                     statements.Add(childFunc);
                     break;
-
                 case OpCode.Return:
                     statements.Add(new ReturnNode(Enumerable.Range(ins.A, ins.B - 1).Select(Reg).ToList()));
                     break;
@@ -129,7 +112,7 @@ public class Disassembler(Function rootFunction)
 
         var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
         
-        // This line (128) will now work because 'function' is the correct type
+        // This line now correctly accesses FunctionIndex from the DeobFunction alias
         var fnName = isAnonymous ? "" : $"v{function.FunctionIndex + BASE_REGISTER_OFFSET}";
         return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
     }
@@ -142,7 +125,6 @@ public class Disassembler(Function rootFunction)
 
         _indent++;
         string inner = new string('\t', _indent);
-
         if (fn.Upvalues.Count > 0) 
             _builder.AppendLine($"{inner}-- upvalues: {string.Join(", ", fn.Upvalues.Select(u => $"(ref) {u}"))}");
 
@@ -164,9 +146,9 @@ public class Disassembler(Function rootFunction)
         }
     }
 
-    private string RK(int val, Function f) => val >= 256 ? FormatConst(f, val - 256) : GetRegName(val);
+    private string RK(int val, DeobFunction f) => val >= 256 ? FormatConst(f, val - 256) : GetRegName(val);
     private string GetRegName(int r) => (r < 2) ? $"v{r + BASE_REGISTER_OFFSET}" : $"v_u_{r + BASE_REGISTER_OFFSET}";
-    private string FormatConst(Function f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
+    private string FormatConst(DeobFunction f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
 }
 
 /* AST MODELS */
