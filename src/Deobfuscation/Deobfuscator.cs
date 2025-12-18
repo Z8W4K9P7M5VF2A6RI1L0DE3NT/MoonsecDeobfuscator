@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using MoonsecDeobfuscator.Ast;
 using MoonsecDeobfuscator.Ast.Literals;
@@ -8,6 +11,9 @@ using MoonsecDeobfuscator.Deobfuscation.Rewriters;
 using MoonsecDeobfuscator.Deobfuscation.Utils;
 using MoonsecDeobfuscator.Deobfuscation.Walkers;
 using NLua;
+
+// Resolving Ambiguous References
+using Block = MoonsecDeobfuscator.Ast.Block;
 using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation;
@@ -19,6 +25,7 @@ public class Deobfuscator
 
     public Function Deobfuscate(string code, bool antiTamper = false)
     {
+        // Now 'Block' explicitly refers to MoonsecDeobfuscator.Ast.Block
         _root = Block.FromString(code);
 
         new Renamer().Walk(_root);
@@ -60,7 +67,6 @@ public class Deobfuscator
             .Where(instr => instr is { IsKA: false, IsKB: true, IsKC: false })
             .ToList();
 
-        // why tf is this static
         var constant = function.Constants[instructions[^2].B - 1];
         var key = ((NumberConstant) constant).Value;
 
@@ -101,3 +107,4 @@ public class Deobfuscator
         }
     }
 }
+
