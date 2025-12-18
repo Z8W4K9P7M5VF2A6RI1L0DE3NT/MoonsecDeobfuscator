@@ -20,12 +20,8 @@ namespace MoonsecBot
 
         public static async Task Main(string[] args)
         {
-            // Load .env for local development
             DotNetEnv.Env.Load();
-
-            // Start a basic web server to keep Render from timing out (Port 3000)
             _ = StartHealthCheckServer();
-
             await new Program().RunAsync();
         }
 
@@ -49,11 +45,7 @@ namespace MoonsecBot
             _client.Ready += ReadyAsync;
             _client.InteractionCreated += HandleInteractionAsync;
 
-            // Retrieve token from .env or Render Environment Variables
             var token = Environment.GetEnvironmentVariable("DISCORD_BOT_TOKEN");
-            if (string.IsNullOrEmpty(token))
-                throw new Exception("DISCORD_BOT_TOKEN missing");
-
             await _client.LoginAsync(TokenType.Bot, token);
             await _client.StartAsync();
 
@@ -65,11 +57,8 @@ namespace MoonsecBot
             var portStr = Environment.GetEnvironmentVariable("PORT") ?? "3000";
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Any, int.Parse(portStr)));
-            
             var app = builder.Build();
             app.MapGet("/", () => "MoonSec Bot is running.");
-            
-            Console.WriteLine($"🌐 Render health check listening on port {portStr}");
             await app.RunAsync();
         }
 
@@ -77,8 +66,6 @@ namespace MoonsecBot
         {
             await _interactions.AddModulesAsync(Assembly.GetEntryAssembly(), _services);
             await _interactions.RegisterCommandsGloballyAsync(true);
-
-            Console.WriteLine($"✅ Connected as {_client.CurrentUser}");
         }
 
         private async Task HandleInteractionAsync(SocketInteraction interaction)
@@ -97,18 +84,14 @@ namespace MoonsecBot
             _service = service;
         }
 
-        [SlashCommand("deobfuscate", "Deobfuscates a MoonSec-protected Lua file.")]
-        public async Task Deobfuscate(
-            [Summary("file", "Lua or text file")] Attachment file,
-            [Choice("Bytecode (.bin)", "bytecode")]
-            [Choice("Disassembly (.txt)", "disassembly")]
-            string format = "disassembly")
+        [SlashCommand("deobfuscate", "Deobfuscates  MoonSecV3/IB2 Lua file.")]
+        public async Task Deobfuscate([Summary("file", "Lua or text file")] Attachment file)
         {
             await DeferAsync();
 
             if (!file.Filename.EndsWith(".lua") && !file.Filename.EndsWith(".txt"))
             {
-                await FollowupAsync("❌ Only `.lua` or `.txt` files are allowed.");
+                await FollowupAsync(" Only `.lua` or `.txt` files are allowed.");
                 return;
             }
 
@@ -118,48 +101,34 @@ namespace MoonsecBot
                 var bytes = await http.GetByteArrayAsync(file.Url);
                 var input = Encoding.UTF8.GetString(bytes);
 
-                byte[] output;
-                string filename;
+                // Run disassembly
+                string deobfuscatedText = _service.Disassemble(input);
+                byte[] outputBytes = Encoding.UTF8.GetBytes(deobfuscatedText);
 
-                if (format == "bytecode")
-                {
-                    output = _service.Devirtualize(input);
-                    filename = "output.bin";
-                }
-                else
-                {
-                    output = Encoding.UTF8.GetBytes(_service.Disassemble(input));
-                    filename = "output.txt";
-                }
+                // Generate random 16-char hex name like: 20852b512aea2d9a.lua
+                string randomHex = Guid.NewGuid().ToString("N").Substring(0, 16);
+                string customFilename = $"{randomHex}.lua";
 
+                // Respond with the specific "twin" message tagging the user
                 await FollowupWithFileAsync(
-                    new MemoryStream(output),
-                    filename,
-                    text: "✅ **Deobfuscation complete**"
+                    new MemoryStream(outputBytes),
+                    customFilename,
+                    text: $"You Out Da Projects Twin 🔫🔫? {Context.User.Mention}"
                 );
             }
             catch (Exception ex)
             {
-                await FollowupAsync($"❌ Error during deobfuscation: `{ex.Message}`");
+                // This will now catch fewer range errors due to the Disassembler logic fix
+                await FollowupAsync($" Error during deobfuscation: `{ex.Message}`");
             }
         }
     }
 
     public class DeobfuscationService
     {
-        public byte[] Devirtualize(string code)
-        {
-            var result = new Deobfuscator().Deobfuscate(code);
-            using var ms = new MemoryStream();
-            using var serializer = new Serializer(ms);
-            serializer.Serialize(result);
-            return ms.ToArray();
-        }
-
         public string Disassemble(string code)
         {
             var result = new Deobfuscator().Deobfuscate(code);
-            // This now calls the class in your separate Disassembler.cs file
             return new Disassembler(result).Disassemble();
         }
     }
