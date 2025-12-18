@@ -1,9 +1,12 @@
 using System;
-using System.Text;
-using System.Linq;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 using System.Diagnostics;
-using MoonsecDeobfuscator.Bytecode.Models; 
+using MoonsecDeobfuscator.Bytecode.Models;
+
+// This alias ensures we use the version of Function that has 'FunctionIndex'
+using Function = MoonsecDeobfuscator.Deobfuscation.Bytecode.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
@@ -125,6 +128,8 @@ public class Disassembler(Function rootFunction)
         }
 
         var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
+        
+        // This line (128) will now work because 'function' is the correct type
         var fnName = isAnonymous ? "" : $"v{function.FunctionIndex + BASE_REGISTER_OFFSET}";
         return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
     }
@@ -171,3 +176,4 @@ public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
 public record CallNode(string Func, List<string> Args) : AstNode;
 public record ReturnNode(List<string> Values) : AstNode;
 public record FunctionNode(string Name, Block Body, List<string> Upvalues, bool IsAnonymous) : AstNode;
+
