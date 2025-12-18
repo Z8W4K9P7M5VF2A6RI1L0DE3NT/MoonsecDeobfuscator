@@ -6,8 +6,8 @@ using System.Diagnostics;
 using MoonsecDeobfuscator.Bytecode.Models;
 
 // This alias ensures we use the version of Function that has 'FunctionIndex'
-// Change the alias to point to the Models namespace
 using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
+
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
