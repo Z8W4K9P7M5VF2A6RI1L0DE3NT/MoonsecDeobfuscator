@@ -3,7 +3,7 @@ using System.Text;
 using System.Linq;
 using System.Collections.Generic;
 using System.Diagnostics;
-using MoonsecDeobfuscator.Bytecode.Models; // This contains your Function class
+using MoonsecDeobfuscator.Bytecode.Models;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
@@ -77,7 +77,7 @@ public class Disassembler(Function rootFunction)
                     statements.Add(new AssignNode(target, Const(ins.B), isFirst));
                     break;
                 case OpCode.GetGlobal:
-                    if (function.Constants[ins.B] is StringConstant sConst)
+                    if (ins.B >= 0 && ins.B < function.Constants.Count && function.Constants[ins.B] is StringConstant sConst)
                         statements.Add(new AssignNode(target, $"game:GetService(\"{sConst.Value}\")", false));
                     break;
                 case OpCode.GetUpval:
@@ -92,24 +92,29 @@ public class Disassembler(Function rootFunction)
                     statements.Add(new AssignNode(target, $"{Reg(ins.B)}.{RK(ins.C, function).Replace("\"", "")}", isFirst));
                     break;
                 case OpCode.Call:
-                    var args = Enumerable.Range(ins.A + 1, ins.B - 1).Select(Reg).ToList();
+                    // FIX: Handle variadic/multireturn calls where B might be 0
+                    int argCount = Math.Max(0, ins.B - 1);
+                    var args = Enumerable.Range(ins.A + 1, argCount).Select(Reg).ToList();
                     statements.Add(new CallNode(Reg(ins.A), args));
                     break;
                 case OpCode.Closure:
-                    var childFunc = BuildFunctionNode(function.Functions[ins.B], true);
-                    statements.Add(new AssignNode(target, "function()", isFirst));
-                    statements.Add(childFunc);
+                    if (ins.B >= 0 && ins.B < function.Functions.Count)
+                    {
+                        var childFunc = BuildFunctionNode(function.Functions[ins.B], true);
+                        statements.Add(new AssignNode(target, "function()", isFirst));
+                        statements.Add(childFunc);
+                    }
                     break;
                 case OpCode.Return:
-                    statements.Add(new ReturnNode(Enumerable.Range(ins.A, ins.B - 1).Select(Reg).ToList()));
+                    // FIX: Handle cases where B is 0 (return all results from last call)
+                    int retCount = Math.Max(0, ins.B - 1);
+                    statements.Add(new ReturnNode(Enumerable.Range(ins.A, retCount).Select(Reg).ToList()));
                     break;
             }
             declaredRegisters.Add(ins.A);
         }
 
         var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
-        
-        // Use the Name property from your model since FunctionIndex isn't in your snippet
         var fnName = isAnonymous ? "" : function.Name;
         return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
     }
@@ -145,7 +150,7 @@ public class Disassembler(Function rootFunction)
 
     private string RK(int val, Function f) => val >= 256 ? FormatConst(f, val - 256) : GetRegName(val);
     private string GetRegName(int r) => (r < 2) ? $"v{r + BASE_REGISTER_OFFSET}" : $"v_u_{r + BASE_REGISTER_OFFSET}";
-    private string FormatConst(Function f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
+    private string FormatConst(Function f, int i) => (i >= 0 && i < f.Constants.Count && f.Constants[i] is StringConstant s) ? $"\"{s.Value}\"" : "nil";
 }
 
 public abstract record AstNode;
@@ -154,4 +159,3 @@ public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
 public record CallNode(string Func, List<string> Args) : AstNode;
 public record ReturnNode(List<string> Values) : AstNode;
 public record FunctionNode(string Name, Block Body, List<string> Upvalues, bool IsAnonymous) : AstNode;
-
