@@ -9,7 +9,8 @@ namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
 public class Disassembler(Function rootFunction)
 {
-    private const int BASE_REGISTER_OFFSET = 18;
+    // Changed to 1 so registers start at v1
+    private const int BASE_REGISTER_OFFSET = 1; 
     private readonly StringBuilder _builder = new();
     private int _indent = 0;
 
@@ -17,18 +18,19 @@ public class Disassembler(Function rootFunction)
     {
         var stopwatch = Stopwatch.StartNew();
         
-        // 1. Generate AST
-        var ast = BuildFunction(rootFunction, isAnonymous: false);
+        // Build AST
+        var ast = BuildFunctionNode(rootFunction, isAnonymous: false);
         
-        // 2. Add Watermark and Timing
         stopwatch.Stop();
+
+        // Watermark Header
         _builder.AppendLine($"-- MoonSecV3 File Decompiled By Enchanted hub.  Time taken to decompile : {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
         _builder.AppendLine();
 
-        // 3. Print AST to Lua
-        PrintFunction(ast);
+        // Print Structured Lua
+        PrintFunctionNode(ast);
 
-        // 4. Entry Point Execution
+        // Entry Point Execution
         if (!ast.IsAnonymous && !string.IsNullOrEmpty(ast.Name))
         {
             _builder.AppendLine($"\n{ast.Name}()");
@@ -37,7 +39,7 @@ public class Disassembler(Function rootFunction)
         return _builder.ToString();
     }
 
-    private FunctionNode BuildFunction(Function function, bool isAnonymous)
+    private FunctionNode BuildFunctionNode(Function function, bool isAnonymous)
     {
         var locals = new HashSet<int>();
         var usedRegs = new HashSet<int>();
@@ -45,16 +47,18 @@ public class Disassembler(Function rootFunction)
         var declaredRegisters = new HashSet<int>();
         var upvalueNames = new Dictionary<int, string>();
 
+        // Logic to determine if we use v or v_u_
         string Reg(int r) {
             usedRegs.Add(r);
-            int displayR = r + BASE_REGISTER_OFFSET; 
-            return (r < 4) ? $"v{displayR}" : $"v_u_{displayR}";
+            int displayR = r + BASE_REGISTER_OFFSET;
+            // Simple logic: if it's a higher register or flagged, use v_u_
+            return (r < 2) ? $"v{displayR}" : $"v_u_{displayR}";
         }
 
         string Declare(int r) {
             locals.Add(r);
             int displayR = r + BASE_REGISTER_OFFSET;
-            return (r < 4) ? $"v{displayR}" : $"v_u_{displayR}";
+            return (r < 2) ? $"v{displayR}" : $"v_u_{displayR}";
         }
 
         string Const(int idx) {
@@ -67,7 +71,6 @@ public class Disassembler(Function rootFunction)
             };
         }
 
-        // --- OPCODE DISPATCHER ---
         for (int i = 0; i < function.Instructions.Count; i++)
         {
             var ins = function.Instructions[i];
@@ -81,12 +84,12 @@ public class Disassembler(Function rootFunction)
                     break;
 
                 case OpCode.LoadK:
-                    statements.Add(new AssignNode(target, Const(ins.B), isFirst && target.Contains("_u_")));
+                    statements.Add(new AssignNode(target, Const(ins.B), isFirst));
                     break;
 
                 case OpCode.GetGlobal:
                     string gName = ((StringConstant)function.Constants[ins.B]).Value;
-                    statements.Add(new AssignNode(target, gName, false));
+                    statements.Add(new AssignNode(target, $"game:GetService(\"{gName}\")", false));
                     break;
 
                 case OpCode.GetUpval:
@@ -99,16 +102,8 @@ public class Disassembler(Function rootFunction)
                     statements.Add(new AssignNode($"upvalue_{ins.B}", Reg(ins.A), false));
                     break;
 
-                case OpCode.NewTable:
-                    statements.Add(new AssignNode(target, "{}", isFirst));
-                    break;
-
                 case OpCode.GetTable:
-                    statements.Add(new AssignNode(target, $"{Reg(ins.B)}[{Reg(ins.C)}]", isFirst));
-                    break;
-
-                case OpCode.SetTable:
-                    statements.Add(new AssignNode($"{Reg(ins.A)}[{Reg(ins.B)}]", Reg(ins.C), false));
+                    statements.Add(new AssignNode(target, $"{Reg(ins.B)}.{RK(ins.C, function).Replace("\"", "")}", isFirst));
                     break;
 
                 case OpCode.Call:
@@ -117,82 +112,62 @@ public class Disassembler(Function rootFunction)
                     break;
 
                 case OpCode.Closure:
-                    // Supports recursive nested functions (Protos)
-                    var childFunc = BuildFunction(function.Protos[ins.BX], true);
-                    statements.Add(new AssignNode(target, "closure_proto", isFirst));
+                    var childFunc = BuildFunctionNode(function.Functions[ins.B], true);
+                    statements.Add(new AssignNode(target, "function()", isFirst));
                     statements.Add(childFunc);
                     break;
 
                 case OpCode.Return:
-                    var rets = Enumerable.Range(ins.A, ins.B - 1).Select(Reg).ToList();
-                    statements.Add(new ReturnNode(rets));
-                    break;
-                
-                case OpCode.Jmp:
-                    statements.Add(new CommentNode($"-- Jump to {i + ins.SBX + 1}"));
+                    statements.Add(new ReturnNode(Enumerable.Range(ins.A, ins.B - 1).Select(Reg).ToList()));
                     break;
             }
             declaredRegisters.Add(ins.A);
         }
 
-        // --- UPVALUE RESOLUTION ---
-        var upRefs = usedRegs.Except(locals).Select(Reg).ToList();
-        upRefs.AddRange(upvalueNames.Values);
-        
-        var fnName = isAnonymous ? "" : $"v_u_{function.FunctionIndex + BASE_REGISTER_OFFSET}";
-        return new FunctionNode(fnName, new Block(statements), upRefs.Distinct().ToList(), isAnonymous);
+        var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
+        var fnName = isAnonymous ? "" : $"v{function.FunctionIndex + BASE_REGISTER_OFFSET}";
+        return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
     }
 
-    // --- LUA PRINTING LOGIC ---
-    private void PrintFunction(FunctionNode fn)
+    private void PrintFunctionNode(FunctionNode fn)
     {
-        string indent = new string('\t', _indent);
-        if (fn.IsAnonymous) _builder.AppendLine($"{indent}function()");
-        else _builder.AppendLine($"{indent}local function {fn.Name}()");
+        string indentStr = new string('\t', _indent);
+        if (fn.IsAnonymous) _builder.AppendLine($"{indentStr}function()");
+        else _builder.AppendLine($"{indentStr}local function {fn.Name}()");
 
         _indent++;
         string inner = new string('\t', _indent);
 
-        // Print Complex Upvalues Header
         if (fn.Upvalues.Count > 0) 
             _builder.AppendLine($"{inner}-- upvalues: {string.Join(", ", fn.Upvalues.Select(u => $"(ref) {u}"))}");
 
-        foreach (var node in fn.Body.Statements) PrintNode(node);
+        foreach (var node in fn.Body.Statements) PrintAstNode(node);
 
         _indent--;
         _builder.AppendLine($"{new string('\t', _indent)}end");
     }
 
-    private void PrintNode(AstNode node) 
+    private void PrintAstNode(AstNode node) 
     {
         string indent = new string('\t', _indent);
         switch (node)
         {
-            case AssignNode a: 
-                _builder.AppendLine($"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}"); 
-                break;
-            case CallNode c: 
-                _builder.AppendLine($"{indent}{c.Func}({string.Join(", ", c.Args)})"); 
-                break;
-            case ReturnNode r: 
-                _builder.AppendLine($"{indent}return {string.Join(", ", r.Values)}"); 
-                break;
-            case CommentNode cm: 
-                _builder.AppendLine($"{indent}{cm.Text}"); 
-                break;
-            case FunctionNode f: 
-                PrintFunction(f); 
-                break;
+            case AssignNode a: _builder.AppendLine($"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}"); break;
+            case CallNode c: _builder.AppendLine($"{indent}{c.Func}({string.Join(", ", c.Args)})"); break;
+            case ReturnNode r: _builder.AppendLine($"{indent}return {string.Join(", ", r.Values)}"); break;
+            case FunctionNode f: PrintFunctionNode(f); break;
         }
     }
+
+    private string RK(int val, Function f) => val >= 256 ? FormatConst(f, val - 256) : GetRegName(val);
+    private string GetRegName(int r) => (r < 2) ? $"v{r + BASE_REGISTER_OFFSET}" : $"v_u_{r + BASE_REGISTER_OFFSET}";
+    private string FormatConst(Function f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
 }
 
-/* --- AST DATA MODELS --- */
+/* AST MODELS */
 public abstract record AstNode;
 public record Block(List<AstNode> Statements) : AstNode;
 public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
 public record CallNode(string Func, List<string> Args) : AstNode;
 public record ReturnNode(List<string> Values) : AstNode;
-public record CommentNode(string Text) : AstNode;
 public record FunctionNode(string Name, Block Body, List<string> Upvalues, bool IsAnonymous) : AstNode;
-
