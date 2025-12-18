@@ -1,10 +1,8 @@
 # STAGE 1: Build
-# Using the full SDK to restore and publish
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /app
 
-# Copy solution and project files first to cache dependencies
-COPY *.sln ./
+# Copy files and restore
 COPY *.csproj ./
 RUN dotnet restore
 
@@ -13,13 +11,18 @@ COPY . ./
 RUN dotnet publish -c Release -o /app/out /p:UseAppHost=false
 
 # STAGE 2: Runtime
-# Using a slim runtime for a tiny final image size
-FROM mcr.microsoft.com/dotnet/runtime:9.0
+# IMPORTANT: Changed to aspnet to support the Port 3000 web listener
+FROM mcr.microsoft.com/dotnet/aspnet:9.0
 WORKDIR /app
 
 # Copy the compiled files from the build stage
 COPY --from=build /app/out ./
 
-# Use ENTRYPOINT for more reliable execution on Render
-# REPLACE 'MoonsecDeobfuscator.dll' with your ACTUAL .csproj name if different!
-ENTRYPOINT ["dotnet", "MoonsecDeobfuscator.dll"]
+# Set the Environment to Production
+ENV DOTNET_ENVIRONMENT=Production
+
+# Expose the port Render uses
+EXPOSE 3000
+
+# Ensure the DLL name matches your actual output name (MoonsecBot.dll)
+ENTRYPOINT ["dotnet", "MoonsecBot.dll"]
