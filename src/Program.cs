@@ -1,171 +1,166 @@
 using Discord;
 using Discord.WebSocket;
-using System;
-using System.IO;
-using System.Linq;
-using System.Net.Http;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Threading;
+using Discord.Interactions;
+using Microsoft.Extensions.DependencyInjection;
+using System.Reflection;
+using System.Text;
+using System.Net;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using MoonsecDeobfuscator.Deobfuscation;
+using MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
-namespace GalacticBytecodeBot
+namespace MoonsecBot
 {
-    public static class Program
+    public class Program
     {
-        private static DiscordSocketClient _client;
-        private static readonly ulong TargetChannel = 1444258745336070164;
-        private static readonly Dictionary<ulong, bool> Busy = new Dictionary<ulong, bool>();
+        private DiscordSocketClient _client;
+        private InteractionService _interactions;
+        private IServiceProvider _services;
 
-        public static async Task Main()
+        public static async Task Main(string[] args)
         {
-            var token = Environment.GetEnvironmentVariable("BOT_TOKEN");
-            if (string.IsNullOrWhiteSpace(token))
-            {
-                Console.WriteLine("BOT_TOKEN missing");
-                return;
-            }
+            // Load .env for local development
+            DotNetEnv.Env.Load();
 
+            // Start a basic web server to keep Render from timing out (Port 3000)
+            _ = StartHealthCheckServer();
+
+            await new Program().RunAsync();
+        }
+
+        public async Task RunAsync()
+        {
             _client = new DiscordSocketClient(new DiscordSocketConfig
             {
-                GatewayIntents = GatewayIntents.All
+                GatewayIntents = GatewayIntents.Guilds,
+                AlwaysDownloadUsers = true
             });
 
-            _client.Ready += async () =>
-            {
-                await _client.SetStatusAsync(UserStatus.DoNotDisturb);
-                await _client.SetActivityAsync(new Game("Galactic Deobfuscatio"));
-            };
+            _interactions = new InteractionService(_client.Rest);
 
-            _client.MessageReceived += HandleMessage;
+            _services = new ServiceCollection()
+                .AddSingleton(_client)
+                .AddSingleton(_interactions)
+                .AddSingleton<DeobfuscationService>()
+                .BuildServiceProvider();
+
+            _client.Log += msg => { Console.WriteLine(msg); return Task.CompletedTask; };
+            _client.Ready += ReadyAsync;
+            _client.InteractionCreated += HandleInteractionAsync;
+
+            // Retrieve token from .env or Render Environment Variables
+            var token = Environment.GetEnvironmentVariable("DISCORD_BOT_TOKEN");
+            if (string.IsNullOrEmpty(token))
+                throw new Exception("DISCORD_BOT_TOKEN missing");
 
             await _client.LoginAsync(TokenType.Bot, token);
             await _client.StartAsync();
+
             await Task.Delay(-1);
         }
 
-        private static async Task HandleMessage(SocketMessage msg)
+        private static async Task StartHealthCheckServer()
         {
-            if (msg.Author.IsBot) return;
+            var portStr = Environment.GetEnvironmentVariable("PORT") ?? "3000";
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Any, int.Parse(portStr)));
+            
+            var app = builder.Build();
+            app.MapGet("/", () => "MoonSec Bot is running.");
+            
+            Console.WriteLine($"🌐 Render health check listening on port {portStr}");
+            await app.RunAsync();
+        }
 
-            if (msg.Channel.Id != TargetChannel && msg.Channel is not SocketDMChannel)
-                return;
+        private async Task ReadyAsync()
+        {
+            await _interactions.AddModulesAsync(Assembly.GetEntryAssembly(), _services);
+            await _interactions.RegisterCommandsGloballyAsync(true);
 
-            if (Busy.ContainsKey(msg.Author.Id))
+            Console.WriteLine($"✅ Connected as {_client.CurrentUser}");
+        }
+
+        private async Task HandleInteractionAsync(SocketInteraction interaction)
+        {
+            var context = new SocketInteractionContext(_client, interaction);
+            await _interactions.ExecuteCommandAsync(context, _services);
+        }
+    }
+
+    public class DeobfuscationModule : InteractionModuleBase<SocketInteractionContext>
+    {
+        private readonly DeobfuscationService _service;
+
+        public DeobfuscationModule(DeobfuscationService service)
+        {
+            _service = service;
+        }
+
+        [SlashCommand("deobfuscate", "Deobfuscates a MoonSec-protected Lua file.")]
+        public async Task Deobfuscate(
+            [Summary("file", "Lua or text file")] Attachment file,
+            [Choice("Bytecode (.bin)", "bytecode")]
+            [Choice("Disassembly (.txt)", "disassembly")]
+            string format = "disassembly")
+        {
+            await DeferAsync();
+
+            if (!file.Filename.EndsWith(".lua") && !file.Filename.EndsWith(".txt"))
             {
-                await msg.Channel.SendMessageAsync($"{msg.Author.Mention} please wait, your previous request is still processing.");
+                await FollowupAsync("❌ Only `.lua` or `.txt` files are allowed.");
                 return;
             }
-
-            Busy[msg.Author.Id] = true;
 
             try
             {
-                string sourceCode = null;
+                using var http = new HttpClient();
+                var bytes = await http.GetByteArrayAsync(file.Url);
+                var input = Encoding.UTF8.GetString(bytes);
 
-                if (msg.Attachments.Count > 0)
+                byte[] output;
+                string filename;
+
+                if (format == "bytecode")
                 {
-                    var att = msg.Attachments.First();
-                    if (!(att.Filename.ToLower().EndsWith(".lua") || att.Filename.ToLower().EndsWith(".luau") || att.Filename.ToLower().EndsWith(".txt")))
-                    {
-                        await msg.Channel.SendMessageAsync($"{msg.Author.Mention} this file type is not allowed.");
-                        Busy.Remove(msg.Author.Id);
-                        return;
-                    }
-
-                    using HttpClient hc = new HttpClient();
-                    var bytes = await hc.GetByteArrayAsync(att.Url);
-                    sourceCode = System.Text.Encoding.UTF8.GetString(bytes);
+                    output = _service.Devirtualize(input);
+                    filename = "output.bin";
+                }
+                else
+                {
+                    output = Encoding.UTF8.GetBytes(_service.Disassemble(input));
+                    filename = "output.txt";
                 }
 
-                if (sourceCode == null)
-                {
-                    Busy.Remove(msg.Author.Id);
-                    return;
-                }
-
-                var statusMsg = await msg.Channel.SendMessageAsync("Turning to bytecode...");
-
-                string bytecodeFile = Guid.NewGuid().ToString().Substring(0, 8) + ".luac";
-                string tempFilePath = Path.Combine(Path.GetTempPath(), bytecodeFile);
-
-                try
-                {
-                    await statusMsg.ModifyAsync(m => m.Content = "Processing...");
-
-                    using (var deob = new Deobfuscator())
-                    {
-                        var result = deob.Deobfuscate(sourceCode);
-
-                        if (result != null)
-                        {
-                            if (result is byte[] byteArray)
-                            {
-                                File.WriteAllBytes(tempFilePath, byteArray);
-                            }
-                            else
-                            {
-                                string resultString = result.ToString();
-                                File.WriteAllText(tempFilePath, resultString);
-                            }
-                        }
-                        else
-                        {
-                            File.WriteAllText(tempFilePath, sourceCode);
-                        }
-                    }
-
-                    await statusMsg.ModifyAsync(m => m.Content = "Bytecode generated successfully");
-
-                    if (File.Exists(tempFilePath) && new FileInfo(tempFilePath).Length > 0)
-                    {
-                        var embed = new EmbedBuilder()
-                            .WithTitle("Luau Bytecode Generated")
-                            .WithColor(new Color((uint)new Random().Next(0xFFFFFF)))
-                            .WithDescription("Your file has been converted to Luau bytecode.")
-                            .WithFooter("Galactic Services")
-                            .Build();
-
-                        await using (var fs = new FileStream(tempFilePath, FileMode.Open, FileAccess.Read))
-                        {
-                            await msg.Channel.SendFileAsync(fs, bytecodeFile, $"{msg.Author.Mention} here is your bytecode file", embed: embed);
-                        }
-                    }
-                    else
-                    {
-                        await msg.Channel.SendMessageAsync($"{msg.Author.Mention} failed to generate bytecode file.");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error: {ex}");
-                    await msg.Channel.SendMessageAsync($"{msg.Author.Mention} an error occurred during processing: {ex.Message}");
-                }
-                finally
-                {
-                    try
-                    {
-                        if (File.Exists(tempFilePath))
-                            File.Delete(tempFilePath);
-                    }
-                    catch { }
-                }
-
-                try
-                {
-                    await msg.DeleteAsync();
-                }
-                catch { }
+                await FollowupWithFileAsync(
+                    new MemoryStream(output),
+                    filename,
+                    text: "✅ **Deobfuscation complete**"
+                );
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex}");
-                await msg.Channel.SendMessageAsync($"{msg.Author.Mention} an error occurred.");
+                await FollowupAsync($"❌ Error during deobfuscation: `{ex.Message}`");
             }
-            finally
-            {
-                if (Busy.ContainsKey(msg.Author.Id))
-                    Busy.Remove(msg.Author.Id);
-            }
+        }
+    }
+
+    public class DeobfuscationService
+    {
+        public byte[] Devirtualize(string code)
+        {
+            var result = new Deobfuscator().Deobfuscate(code);
+            using var ms = new MemoryStream();
+            using var serializer = new Serializer(ms);
+            serializer.Serialize(result);
+            return ms.ToArray();
+        }
+
+        public string Disassemble(string code)
+        {
+            var result = new Deobfuscator().Deobfuscate(code);
+            // This now calls the class in your separate Disassembler.cs file
+            return new Disassembler(result).Disassemble();
         }
     }
 }
