@@ -3,14 +3,11 @@ using System.Text;
 using System.Linq;
 using System.Collections.Generic;
 using System.Diagnostics;
-using MoonsecDeobfuscator.Bytecode.Models;
-
-// Fix for CS0234: Forces the compiler to find the specific Deobfuscation Function class
-using DeobFunction = global::MoonsecDeobfuscator.Deobfuscation.Bytecode.Function;
+using MoonsecDeobfuscator.Bytecode.Models; // This contains your Function class
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
-public class Disassembler(DeobFunction rootFunction)
+public class Disassembler(Function rootFunction)
 {
     private const int BASE_REGISTER_OFFSET = 1; 
     private readonly StringBuilder _builder = new();
@@ -35,7 +32,7 @@ public class Disassembler(DeobFunction rootFunction)
         return _builder.ToString();
     }
 
-    private FunctionNode BuildFunctionNode(DeobFunction function, bool isAnonymous)
+    private FunctionNode BuildFunctionNode(Function function, bool isAnonymous)
     {
         var locals = new HashSet<int>();
         var usedRegs = new HashSet<int>();
@@ -80,8 +77,8 @@ public class Disassembler(DeobFunction rootFunction)
                     statements.Add(new AssignNode(target, Const(ins.B), isFirst));
                     break;
                 case OpCode.GetGlobal:
-                    string gName = ((StringConstant)function.Constants[ins.B]).Value;
-                    statements.Add(new AssignNode(target, $"game:GetService(\"{gName}\")", false));
+                    if (function.Constants[ins.B] is StringConstant sConst)
+                        statements.Add(new AssignNode(target, $"game:GetService(\"{sConst.Value}\")", false));
                     break;
                 case OpCode.GetUpval:
                     string upName = $"upvalue_{ins.B}";
@@ -112,8 +109,8 @@ public class Disassembler(DeobFunction rootFunction)
 
         var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
         
-        // This line now correctly accesses FunctionIndex from the DeobFunction alias
-        var fnName = isAnonymous ? "" : $"v{function.FunctionIndex + BASE_REGISTER_OFFSET}";
+        // Use the Name property from your model since FunctionIndex isn't in your snippet
+        var fnName = isAnonymous ? "" : function.Name;
         return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
     }
 
@@ -146,12 +143,11 @@ public class Disassembler(DeobFunction rootFunction)
         }
     }
 
-    private string RK(int val, DeobFunction f) => val >= 256 ? FormatConst(f, val - 256) : GetRegName(val);
+    private string RK(int val, Function f) => val >= 256 ? FormatConst(f, val - 256) : GetRegName(val);
     private string GetRegName(int r) => (r < 2) ? $"v{r + BASE_REGISTER_OFFSET}" : $"v_u_{r + BASE_REGISTER_OFFSET}";
-    private string FormatConst(DeobFunction f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
+    private string FormatConst(Function f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
 }
 
-/* AST MODELS */
 public abstract record AstNode;
 public record Block(List<AstNode> Statements) : AstNode;
 public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
