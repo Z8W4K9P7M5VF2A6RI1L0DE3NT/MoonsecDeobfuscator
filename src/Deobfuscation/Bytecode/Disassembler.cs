@@ -23,7 +23,6 @@ public class Disassembler(Function rootFunction)
         _builder.AppendLine($"-- Time taken: {stopwatch.Elapsed.TotalMilliseconds:F4} ms\n");
 
         PrintFunctionNode(ast);
-
         return _builder.ToString();
     }
 
@@ -33,12 +32,8 @@ public class Disassembler(Function rootFunction)
         var virtualStack = new Dictionary<int, string>();
         var declaredRegisters = new HashSet<int>();
         var upvalueNames = new Dictionary<int, string>();
-        var usedRegs = new HashSet<int>();
 
-        string GetVal(int r) {
-            usedRegs.Add(r);
-            return virtualStack.TryGetValue(r, out var val) ? val : $"v{r + BASE_REGISTER_OFFSET}";
-        }
+        string GetVal(int r) => virtualStack.TryGetValue(r, out var val) ? val : $"v{r + BASE_REGISTER_OFFSET}";
 
         string Const(int idx) {
             if (idx < 0 || idx >= function.Constants.Count) return "nil";
@@ -60,61 +55,44 @@ public class Disassembler(Function rootFunction)
                 case OpCode.Move:
                     virtualStack[ins.A] = GetVal(ins.B);
                     break;
-
                 case OpCode.LoadK:
                     virtualStack[ins.A] = Const(ins.B);
                     statements.Add(new AssignNode(targetName, virtualStack[ins.A], !declaredRegisters.Contains(ins.A)));
                     break;
-
                 case OpCode.GetGlobal:
                     virtualStack[ins.A] = Const(ins.B).Replace("\"", "");
                     break;
-
                 case OpCode.GetUpval:
                     string upName = $"upvalue_{ins.B}";
                     upvalueNames[ins.B] = upName;
                     virtualStack[ins.A] = upName;
                     break;
-
                 case OpCode.SetUpval:
                     statements.Add(new AssignNode($"upvalue_{ins.B}", GetVal(ins.A), false));
                     break;
-
                 case OpCode.GetTable:
                     string key = RK(ins.C, function, GetVal).Replace("\"", "");
                     virtualStack[ins.A] = $"{GetVal(ins.B)}.{key}";
                     break;
-
                 case OpCode.Call:
                     int argCount = Math.Max(0, ins.B - 1);
                     var args = Enumerable.Range(ins.A + 1, argCount).Select(GetVal).ToList();
                     string func = GetVal(ins.A);
-
                     if (func.Contains(".GetService")) func = func.Replace(".GetService", ":GetService");
-
-                    if (ins.C > 1) {
-                        virtualStack[ins.A] = $"{func}({string.Join(", ", args)})";
-                    } else {
-                        statements.Add(new CallNode(func, args));
-                    }
+                    
+                    if (ins.C > 1) virtualStack[ins.A] = $"{func}({string.Join(", ", args)})";
+                    else statements.Add(new CallNode(func, args));
                     break;
-
                 case OpCode.Closure:
                     var child = BuildFunctionNode(function.Functions[ins.B], true);
                     statements.Add(new AssignNode(targetName, "function()", !declaredRegisters.Contains(ins.A)));
                     statements.Add(child);
                     virtualStack[ins.A] = targetName;
                     break;
-
-                case OpCode.Tst:
-                    statements.Add(new RawNode($"if {GetVal(ins.A)} then"));
-                    break;
-
                 case OpCode.Jmp:
                     if (ins.B < 0) statements.Add(new RawNode("while true do"));
                     else statements.Add(new RawNode("end"));
                     break;
-
                 case OpCode.Return:
                     int retCount = Math.Max(0, ins.B - 1);
                     if (retCount > 0)
@@ -124,9 +102,7 @@ public class Disassembler(Function rootFunction)
             declaredRegisters.Add(ins.A);
         }
 
-        // Collect all unique upvalues used in this scope
-        var upvalueList = upvalueNames.Values.Distinct().ToList();
-        return new FunctionNode(isAnonymous ? "" : function.Name, new Block(statements), upvalueList, isAnonymous);
+        return new FunctionNode(isAnonymous ? "" : function.Name, new Block(statements), upvalueNames.Values.Distinct().ToList(), isAnonymous);
     }
 
     private void PrintFunctionNode(FunctionNode fn)
@@ -134,22 +110,16 @@ public class Disassembler(Function rootFunction)
         string indentStr = new string('\t', _indent);
         bool hasHeader = fn.IsAnonymous || !string.IsNullOrEmpty(fn.Name);
 
-        if (hasHeader)
-        {
+        if (hasHeader) {
             _builder.AppendLine($"{indentStr}{(fn.IsAnonymous ? "function()" : $"local function {fn.Name}()")}");
             _indent++;
-            
-            // Add the upvalue comment back
             if (fn.Upvalues.Count > 0)
-            {
                 _builder.AppendLine($"{new string('\t', _indent)}-- upvalues: {string.Join(", ", fn.Upvalues.Select(u => $"(ref) {u}"))}");
-            }
         }
 
         foreach (var node in fn.Body.Statements) PrintAstNode(node);
 
-        if (hasHeader)
-        {
+        if (hasHeader) {
             _indent--;
             _builder.AppendLine($"{new string('\t', _indent)}end");
         }
@@ -161,7 +131,6 @@ public class Disassembler(Function rootFunction)
         switch (node)
         {
             case AssignNode a: 
-                // Don't print internal "pathing" variables or temporary service captures
                 if (a.Right == "game" || a.Right == "workspace" || a.Right.Contains(":GetService")) return;
                 _builder.AppendLine($"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}"); 
                 break;
