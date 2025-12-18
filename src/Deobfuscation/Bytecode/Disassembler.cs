@@ -1,3 +1,4 @@
+#nullable disable
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -5,15 +6,13 @@ using System.Text;
 using System.Diagnostics;
 using MoonsecDeobfuscator.Bytecode.Models;
 
-// This alias ensures we use the version of Function that has 'FunctionIndex'
+// This alias ensures we use the version of Function from your Models
 using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
-
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
 public class Disassembler(Function rootFunction)
 {
-    // Changed to 1 so registers start at v1
     private const int BASE_REGISTER_OFFSET = 1; 
     private readonly StringBuilder _builder = new();
     private int _indent = 0;
@@ -22,13 +21,13 @@ public class Disassembler(Function rootFunction)
     {
         var stopwatch = Stopwatch.StartNew();
         
-        // Build AST
-        var ast = BuildFunctionNode(rootFunction, isAnonymous: false);
+        // Build AST - Root function starts at index 0
+        var ast = BuildFunctionNode(rootFunction, isAnonymous: false, funcIndex: 0);
         
         stopwatch.Stop();
 
         // Watermark Header
-        _builder.AppendLine($"-- MoonSecV3 File Decompiled By Enchanted hub.  Time taken to decompile : {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
+        _builder.AppendLine($"-- MoonSecV3 File Decompiled By Gemini. Time taken: {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
         _builder.AppendLine();
 
         // Print Structured Lua
@@ -43,7 +42,7 @@ public class Disassembler(Function rootFunction)
         return _builder.ToString();
     }
 
-    private FunctionNode BuildFunctionNode(Function function, bool isAnonymous)
+    private FunctionNode BuildFunctionNode(Function function, bool isAnonymous, int funcIndex)
     {
         var locals = new HashSet<int>();
         var usedRegs = new HashSet<int>();
@@ -51,11 +50,9 @@ public class Disassembler(Function rootFunction)
         var declaredRegisters = new HashSet<int>();
         var upvalueNames = new Dictionary<int, string>();
 
-        // Logic to determine if we use v or v_u_
         string Reg(int r) {
             usedRegs.Add(r);
             int displayR = r + BASE_REGISTER_OFFSET;
-            // Simple logic: if it's a higher register or flagged, use v_u_
             return (r < 2) ? $"v{displayR}" : $"v_u_{displayR}";
         }
 
@@ -116,7 +113,8 @@ public class Disassembler(Function rootFunction)
                     break;
 
                 case OpCode.Closure:
-                    var childFunc = BuildFunctionNode(function.Functions[ins.B], true);
+                    // Pass child index explicitly to BuildFunctionNode
+                    var childFunc = BuildFunctionNode(function.Functions[ins.B], true, ins.B);
                     statements.Add(new AssignNode(target, "function()", isFirst));
                     statements.Add(childFunc);
                     break;
@@ -130,8 +128,8 @@ public class Disassembler(Function rootFunction)
 
         var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
         
-        // This line (128) will now work because 'function' is the correct type
-        var fnName = isAnonymous ? "" : $"v{function.FunctionIndex + BASE_REGISTER_OFFSET}";
+        // FIXED: Using funcIndex parameter instead of missing property
+        var fnName = isAnonymous ? "" : $"v{funcIndex + BASE_REGISTER_OFFSET}";
         return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
     }
 
