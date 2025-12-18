@@ -22,7 +22,7 @@ public class Disassembler(Function rootFunction)
         var ast = BuildFunctionNode(rootFunction, isAnonymous: false, funcIndex: 0);
         stopwatch.Stop();
 
-        _builder.AppendLine($"-- MoonSecV3 File Decompiled By Gemini. Time: {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
+        _builder.AppendLine($"-- MoonSecV3 Decompiled by Enchanted Hub v1 Beta. Time: {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
         _builder.AppendLine();
 
         PrintFunctionNode(ast);
