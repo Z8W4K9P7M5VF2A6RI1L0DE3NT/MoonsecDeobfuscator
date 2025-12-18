@@ -2,27 +2,23 @@
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /app
 
-# Copy files and restore
+# Copy csproj and restore dependencies
 COPY *.csproj ./
 RUN dotnet restore
 
-# Copy the rest of the source code and build
+# Copy the rest of the source code
 COPY . ./
-RUN dotnet publish -c Release -o /app/out /p:UseAppHost=false
+
+# Publish targeting the project file specifically to avoid Solution-level errors
+RUN dotnet publish MoonsecDeobfuscator.csproj -c Release -o /app/out /p:UseAppHost=false
 
 # STAGE 2: Runtime
-# IMPORTANT: Changed to aspnet to support the Port 3000 web listener
 FROM mcr.microsoft.com/dotnet/aspnet:9.0
 WORKDIR /app
+COPY --from=build /app/out .
 
-# Copy the compiled files from the build stage
-COPY --from=build /app/out ./
-
-# Set the Environment to Production
-ENV DOTNET_ENVIRONMENT=Production
-
-# Expose the port Render uses
+# Set the port to 3000
 EXPOSE 3000
+ENV ASPNETCORE_URLS=http://+:3000
 
-# Ensure the DLL name matches your actual output name (MoonsecBot.dll)
-ENTRYPOINT ["dotnet", "MoonsecBot.dll"]
+ENTRYPOINT ["dotnet", "MoonsecDeobfuscator.dll"]
