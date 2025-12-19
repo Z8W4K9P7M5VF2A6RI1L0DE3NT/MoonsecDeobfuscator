@@ -8,6 +8,12 @@ using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
+public abstract record AstNode;
+public record Block(List<AstNode> Statements) : AstNode;
+public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
+public record CallNode(string Func, List<string> Args) : AstNode;
+public record FunctionNode(string Name, Block Body, bool IsAnonymous) : AstNode;
+
 public class Disassembler(Function rootFunction)
 {
     private readonly StringBuilder _builder = new();
