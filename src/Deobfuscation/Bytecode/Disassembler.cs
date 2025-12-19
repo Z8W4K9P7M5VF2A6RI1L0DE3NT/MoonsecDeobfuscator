@@ -9,6 +9,13 @@ using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
+// --- AST Node Definitions (Moved to ensure visibility) ---
+public abstract record AstNode;
+public record Block(List<AstNode> Statements) : AstNode;
+public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
+public record CallNode(string Func, List<string> Args) : AstNode;
+public record FunctionNode(string Name, Block Body, bool IsAnonymous) : AstNode;
+
 public class Disassembler(Function rootFunction)
 {
     private readonly StringBuilder _builder = new();
@@ -16,11 +23,14 @@ public class Disassembler(Function rootFunction)
 
     public string Disassemble()
     {
+        // Re-declaring the root function node
         var ast = BuildFunctionNode(rootFunction, "MainScript", false);
+        
         _builder.AppendLine("-- Reconstructed High-Level Source");
         _builder.AppendLine("-- Universal Property & Service Mapping Enabled\n");
         PrintFunctionNode(ast);
         _builder.AppendLine("\nMainScript()");
+        
         return _builder.ToString();
     }
 
@@ -30,7 +40,6 @@ public class Disassembler(Function rootFunction)
         var registerState = new Dictionary<int, RegisterIdentity>();
         var declaredRegs = new HashSet<int>();
 
-        // Resolves the current best name for a register
         string GetName(int r) => registerState.TryGetValue(r, out var id) ? id.CurrentName : $"v{r + 1}";
 
         for (int i = 0; i < function.Instructions.Count; i++)
@@ -58,7 +67,6 @@ public class Disassembler(Function rootFunction)
                     var args = Enumerable.Range(ins.A + 1, argCount).Select(GetName).ToList();
                     string fName = GetName(ins.A);
 
-                    // Universal Service & Method Result Tracking
                     if ((fName == "game" || fName.EndsWith("GetService")) && args.Count > 0)
                     {
                         string serviceName = args[0].Replace("\"", "");
@@ -75,10 +83,7 @@ public class Disassembler(Function rootFunction)
                 case OpCode.GetTable:
                     string tbl = GetName(ins.B);
                     string key = RK(ins.C, function).Replace("\"", "");
-                    
-                    // Universal Property Tracking: Name the variable after the key it indexed
                     registerState[ins.A].Update(key);
-
                     statements.Add(new AssignNode(GetName(ins.A), $"{tbl}.{key}", isFirst));
                     break;
 
