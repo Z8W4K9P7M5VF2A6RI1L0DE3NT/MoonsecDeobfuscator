@@ -36,6 +36,12 @@ public class Disassembler(Function rootFunction)
         var regs = new Dictionary<int, string>();
         var insts = function.Instructions;
         var endMarkers = new Dictionary<int, string>();
+        var variableMap = new Dictionary<string, string>();
+        var variableCounter = new Dictionary<string, int>();
+        var scopeStack = new Stack<Dictionary<string, string>>();
+
+        // Push a new scope for the function
+        scopeStack.Push(new Dictionary<string, string>());
 
         for (int i = 0; i < insts.Count; i++)
         {
@@ -100,7 +106,11 @@ public class Disassembler(Function rootFunction)
                     break;
 
                 case OpCode.SetTable:
-                    statements.Add(new AssignNode($"{GetReg(regs, ins.A)}.{RK(ins.B, function).Replace("\"", "")}", RK(ins.C, function), false));
+                    string left = $"{GetReg(regs, ins.A)}.{RK(ins.B, function).Replace("\"", "")}";
+                    string right = RK(ins.C, function);
+                    left = RenameVariable(left, scopeStack.Peek(), variableCounter);
+                    right = RenameVariable(right, scopeStack.Peek(), variableCounter);
+                    statements.Add(new AssignNode(left, right, false));
                     break;
 
                 case OpCode.Closure:
@@ -134,6 +144,10 @@ public class Disassembler(Function rootFunction)
                     break;
             }
         }
+
+        // Pop the current scope
+        scopeStack.Pop();
+
         return new FunctionNode(name, new Block(statements), isAnon);
     }
 
@@ -168,4 +182,19 @@ public class Disassembler(Function rootFunction)
     private string GetReg(Dictionary<int, string> regs, int r) => regs.TryGetValue(r, out var v) ? v : $"v{r}";
     private string RK(int val, Function f) => val >= 256 ? FormatConst(f, val - 256) : GetReg(new Dictionary<int, string>(), val);
     private string FormatConst(Function f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
+
+    private string RenameVariable(string original, Dictionary<string, string> currentScope, Dictionary<string, int> variableCounter)
+    {
+        if (currentScope.ContainsKey(original))
+        {
+            return currentScope[original];
+        }
+        else
+        {
+            string newVarName = $"var_{variableCounter.Count}";
+            currentScope[original] = newVarName;
+            variableCounter[original] = 1;
+            return newVarName;
+        }
+    }
 }
