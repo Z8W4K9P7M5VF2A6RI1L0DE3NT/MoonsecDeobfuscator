@@ -654,7 +654,7 @@ local function I(J)
             R:gsub(
             ""0[xX]([%x_]+)"",
             function(S)
-                local T = S:gsub(""_""', '""')
+                local T = S:gsub(""_"",'""')
                 return ""0x"" .. T
             end
         )
@@ -1353,7 +1353,7 @@ bk = function(aS, bw)
                         local bc = string.rep(""    "", t.indent + 1)
                         table.insert(b8, bd .. "" = "" .. bL .. ""\n"" .. table.concat(bM, ""\n"") .. ""\n"" .. bc .. ""end"")
                     elseif bG == bE then
-                        local bN = bI ~= ""\\"" and ""function("" .. bI .. "") end"" or ""function() end""
+                        local bN = bI != ""\\"" and ""function("" .. bI .. "") end"" or ""function() end""
                         table.insert(b8, bd .. "" = "" .. bN)
                     else
                         table.insert(b8, bd .. "" = "" .. aZ(aF))
@@ -1368,7 +1368,7 @@ bk = function(aS, bw)
                 )
             elseif j(b5) == ""function"" then
                 if #bJ > 0 then
-                    local bL = bI ~= '""' and ""function("" .. bI .. "")"" or ""function()""
+                    local bL = bI != '""' and ""function("" .. bI .. "")"" or ""function()""
                     local bb = string.rep(""    "", t.indent + 1)
                     local bM = {}
                     for W, aw in ipairs(bJ) do
@@ -1379,7 +1379,7 @@ bk = function(aS, bw)
                         bL .. ""\n"" .. table.concat(bM, ""\n"") .. ""\n"" .. string.rep(""    "", t.indent) .. ""end""
                     )
                 else
-                    local bN = bI ~= '""' and ""function("" .. bI .. "") end"" or ""function() end""
+                    local bN = bI != ""\\"" and ""function("" .. bI .. "") end"" or ""function() end""
                     table.insert(bK, bN)
                 end
             else
@@ -2770,7 +2770,7 @@ local function dz(dA)
         else
             local aI = bd:gsub(""'"", ""\\\\'"")
             if dD then
-                return dD .. ""['"" .. aI .. ""]""
+                return dD .. ""['"" .. aI .. "']""
             end
             return ""['"" .. aI .. "']""
         end
@@ -2805,7 +2805,7 @@ local exploit_funcs = {getgenv = function()
     end, getfenv = function(dH)
         return _G
     end, setfenv = function(dI, dJ)
-        if j(dI) ~= ""function"" then
+        if j(dI) != ""function"" then
             return
         end
         local L = 1
@@ -2946,7 +2946,7 @@ local exploit_funcs = {getgenv = function()
         end, generatekey = function(dZ)
             return string.rep(""0"", dZ or 32)
         end, generatebytes = function(dZ)
-            return string.rep(""\\0"", dZ or 16)
+            return string.rep(""\0"", dZ or 16)
         end}, base64_encode = function(cJ)
         return cJ
     end, base64_decode = function(cJ)
@@ -3192,7 +3192,7 @@ ed.replace = function(U, b5, eg, eh)
     return U & ~(ei << eg) | (b5 & ei << eg)
 end
 ed.btest = function(bo, aa)
-    return ed.band(bo, aa) ~= 0
+    return ed.band(bo, aa) != 0
 end
 bit32 = ed
 bit = ed
@@ -3457,7 +3457,7 @@ end
 _G.tostring = tostring
 t.last_http_url = nil
 loadstring = function(al, eu)
-    if j(al) ~= ""string"" then
+    if j(al) != ""string"" then
         return function()
             return bj(""loaded"", false)
         end
