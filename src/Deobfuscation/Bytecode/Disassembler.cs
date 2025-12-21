@@ -10,7 +10,7 @@ using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
-// --- Enhanced AST Nodes for Clean Output ---
+// --- Clean AST Nodes ---
 public abstract record AstNode;
 public record Block(List<AstNode> Statements) : AstNode;
 public record AssignNode(string Left, string Right, bool IsLocal, string Comment = null) : AstNode;
@@ -18,6 +18,7 @@ public record CallNode(string Func, List<string> Args, bool IsMethodCall = false
 public record FunctionNode(string Name, Block Body, List<string> Parameters, bool IsLocal = false) : AstNode;
 public record IfNode(string Condition, Block ThenBlock, Block ElseBlock = null) : AstNode;
 public record WhileNode(string Condition, Block Body) : AstNode;
+public record ForNode(string Var, string Iterable, Block Body) : AstNode;
 public record RawNode(string Code, string Comment = null) : AstNode;
 public record CommentNode(string Text) : AstNode;
 
@@ -26,13 +27,12 @@ public class DeobfuscatorState
     public List<string> Output { get; } = new();
     public int Indent { get; set; } = 0;
     public Dictionary<object, string> Registry { get; } = new(ReferenceEqualityComparer.Instance);
-    public Dictionary<string, object> ReverseRegistry { get; } = new();
     public HashSet<string> DeclaredVariables { get; } = new();
     public List<RemoteCall> CallGraph { get; } = new();
     public List<StringRef> StringRefs { get; } = new();
     public Dictionary<string, string> ServiceMap { get; } = new();
     public int ProxyId { get; set; } = 0;
-    public bool LimitReached { get; set; } = false;
+    public string LastHttpUrl { get; set; } = null;
 }
 
 public class RemoteCall
@@ -52,22 +52,20 @@ public class StringRef
 public class DeobfuscatorSettings
 {
     public int MaxDepth { get; set; } = 15;
-    public string OutputFile { get; set; } = "dumped_output.lua";
+    public string OutputFile { get; set; } = "clean_output.lua";
     public bool Verbose { get; set; } = false;
-    public double TimeoutSeconds { get; set; } = 6.7;
+}
+
+public static class ProxyMarkers
+{
+    public static readonly object ProxyIdMarker = new();
 }
 
 public class ProxyFactory
 {
     private readonly DeobfuscatorState _state;
     private readonly Dictionary<string, int> _nameCounters = new();
-    private readonly Dictionary<string, string> _serviceShortcuts = new()
-    {
-        ["Players"] = "Players", ["Workspace"] = "Workspace", ["ReplicatedStorage"] = "ReplicatedStorage",
-        ["UserInputService"] = "UserInputService", ["RunService"] = "RunService", ["HttpService"] = "HttpService",
-        ["TeleportService"] = "TeleportService", ["VirtualUser"] = "VirtualUser", 
-        ["VirtualInputManager"] = "VirtualInputManager", ["GroupService"] = "GroupService"
-    };
+    private readonly HashSet<string> _uiLibraries = new() { "Library", "Rayfield", "OrionLib", "Kavo" };
 
     public ProxyFactory(DeobfuscatorState state)
     {
@@ -78,21 +76,39 @@ public class ProxyFactory
     {
         if (_state.Registry.TryGetValue(obj, out var name)) return name;
         
-        if (isService && !string.IsNullOrEmpty(suggestedName) && _serviceShortcuts.TryGetValue(suggestedName, out var shortcut))
-        {
-            _state.Registry[obj] = shortcut;
-            return shortcut;
-        }
-
-        string baseName = Regex.Replace(suggestedName ?? "obj", @"[^a-zA-Z0-9_]", "");
+        // Clean the suggested name
+        string baseName = suggestedName ?? "obj";
+        baseName = Regex.Replace(baseName, @"[^a-zA-Z0-9_]", "");
         baseName = Regex.Replace(baseName, @"^\d+", "");
         if (string.IsNullOrWhiteSpace(baseName)) baseName = "obj";
         
+        // Check for UI library patterns
+        if (_uiLibraries.Contains(baseName))
+        {
+            _state.Registry[obj] = baseName;
+            return baseName;
+        }
+        
+        // Services get clean names
+        if (isService || baseName.EndsWith("Service"))
+        {
+            string serviceName = baseName.Replace("Service", "");
+            if (!_nameCounters.ContainsKey(serviceName))
+            {
+                _state.Registry[obj] = serviceName;
+                _nameCounters[serviceName] = 1;
+                return serviceName;
+            }
+        }
+
+        // Generate unique name
         string cleanName = _nameCounters.ContainsKey(baseName) ? 
             $"{baseName}_{++_nameCounters[baseName]}" : 
             baseName;
         
-        _nameCounters[baseName] = 1;
+        if (!_nameCounters.ContainsKey(baseName))
+            _nameCounters[baseName] = 1;
+            
         _state.Registry[obj] = cleanName;
         return cleanName;
     }
@@ -104,8 +120,8 @@ public class Disassembler
     private readonly DeobfuscatorState _state = new();
     private readonly DeobfuscatorSettings _settings = new();
     private readonly ProxyFactory _proxyFactory;
-    private int _indent = 0;
     private readonly Function _rootFunction;
+    private int _indentLevel = 0;
 
     public Disassembler(Function rootFunction)
     {
@@ -119,9 +135,10 @@ public class Disassembler
         _builder.AppendLine("-- Target: Roblox / Moonsec VM");
         _builder.AppendLine("-- Generated using ixvixv4 simulation engine");
         _builder.AppendLine();
-
+        
         ResetState();
-        GenerateCleanOutput();
+        var main = BuildFunctionNode(_rootFunction, "Main", false);
+        ProcessBlock(main.Body);
         
         AppendStringRefs();
         AppendCallGraph();
@@ -131,57 +148,15 @@ public class Disassembler
 
     private void ResetState()
     {
-        _state.Output.Clear();
+        _builder.Clear();
         _state.Registry.Clear();
-        _state.ReverseRegistry.Clear();
         _state.DeclaredVariables.Clear();
         _state.CallGraph.Clear();
         _state.StringRefs.Clear();
         _state.ServiceMap.Clear();
         _state.Indent = 0;
         _state.ProxyId = 0;
-        _state.LimitReached = false;
-
-        // Predefine common services
-        _state.ServiceMap["Players"] = "Players";
-        _state.ServiceMap["Workspace"] = "Workspace";
-        _state.ServiceMap["ReplicatedStorage"] = "ReplicatedStorage";
-    }
-
-    private void GenerateCleanOutput()
-    {
-        _builder.AppendLine("-- Load the UI library");
-        _builder.AppendLine("local Library = loadstring(game:HttpGet(\"https://raw.githubusercontent.com/0fflineAdd1ct/CH/main/Library.lua\"))()");
-        _builder.AppendLine("local Window = Library:CreateWindow(\"CodeHub | Legends Of Speed\")");
-        _builder.AppendLine();
-        
-        _builder.AppendLine("-- Services");
-        _builder.AppendLine("local Players = game:GetService(\"Players\")");
-        _builder.AppendLine("local HttpService = game:GetService(\"HttpService\")");
-        _builder.AppendLine("local UserInputService = game:GetService(\"UserInputService\")");
-        _builder.AppendLine("local RunService = game:GetService(\"RunService\")");
-        _builder.AppendLine("local GroupService = game:GetService(\"GroupService\")");
-        _builder.AppendLine("local ReplicatedStorage = game:GetService(\"ReplicatedStorage\")");
-        _builder.AppendLine("local VirtualUser = game:GetService(\"VirtualUser\")");
-        _builder.AppendLine("local TeleportService = game:GetService(\"TeleportService\")");
-        _builder.AppendLine("local VirtualInputManager = game:GetService(\"VirtualInputManager\")");
-        _builder.AppendLine();
-        
-        _builder.AppendLine("-- Player setup");
-        _builder.AppendLine("local LocalPlayer = Players.LocalPlayer");
-        _builder.AppendLine("local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()");
-        _builder.AppendLine("local Humanoid = Character:WaitForChild(\"Humanoid\")");
-        _builder.AppendLine("local HumanoidRootPart = Character:WaitForChild(\"HumanoidRootPart\")");
-        _builder.AppendLine();
-        
-        _builder.AppendLine("-- Global flags");
-        _builder.AppendLine("_G.AR = false");
-        _builder.AppendLine("_G.loop = false");
-        _builder.AppendLine();
-        
-        // Process bytecode to extract the actual logic
-        var main = BuildFunctionNode(_rootFunction, "Main", false);
-        PrintBlock(main.Body);
+        _state.LastHttpUrl = null;
     }
 
     private void AppendStringRefs()
@@ -202,7 +177,7 @@ public class Disassembler
         _builder.AppendLine("\n-- [Remote Calls]");
         foreach (var call in _state.CallGraph)
         {
-            _builder.AppendLine($"-- {call.Type}: {call.Name}({string.Join(", ", call.Args)})");
+            _builder.AppendLine($"-- {call.Type}: {call.Name}({string.Join(", ", call.Args.Select(a => a?.ToString() ?? "nil"))})");
         }
     }
 
@@ -229,25 +204,27 @@ public class Disassembler
                     break;
 
                 case OpCode.GetTable:
-                    HandleGetTable(regs, ins, function, statements);
+                    regs[ins.A] = HandleTableAccess(regs, ins, function);
                     break;
 
                 case OpCode.SetTable:
-                    HandleSetTable(regs, ins, function, statements);
+                    HandlePropertyAssignment(regs, ins, function, statements);
                     break;
 
                 case OpCode.Self:
-                    HandleSelf(regs, ins, function);
+                    HandleSelfCall(regs, ins, function, statements);
                     break;
 
                 case OpCode.Call:
                     HandleCall(regs, ins, function, statements);
                     break;
 
-                case OpCode.Eq:
-                case OpCode.Lt:
-                case OpCode.Le:
-                    // Skip - handled in jump logic
+                case OpCode.Closure:
+                    regs[ins.A] = $"<function_{ins.B}>";
+                    break;
+
+                case OpCode.Jmp:
+                    // Control flow handled by pattern matching
                     break;
 
                 case OpCode.Return:
@@ -260,47 +237,44 @@ public class Disassembler
         return new FunctionNode(name, new Block(statements), new List<string>(), isAnon);
     }
 
-    private void HandleGetTable(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
+    private object HandleTableAccess(Dictionary<int, object> regs, Instruction ins, Function f)
     {
         var tbl = GetRegister(regs, ins.B);
         var key = GetRk(regs, f, ins.C)?.ToString().Trim('"');
         
         if (tbl is string tblStr && key != null)
         {
-            if (tblStr == "game" && _state.ServiceMap.ContainsKey(key))
+            if (tblStr == "game" && !_state.DeclaredVariables.Contains(key) && key.EndsWith("Service"))
             {
-                regs[ins.A] = _state.ServiceMap[key];
+                string serviceVar = key.Replace("Service", "");
+                _state.DeclaredVariables.Add(serviceVar);
+                return $"game:GetService(\"{key}\")";
             }
-            else if (tblStr == "_G" || tblStr == "workspace" || tblStr == "script")
-            {
-                regs[ins.A] = $"{tblStr}.{key}";
-            }
-            else
-            {
-                regs[ins.A] = $"{tblStr}.{key}";
-            }
+            return $"{tblStr}.{key}";
         }
+        return $"unknown.{key}";
     }
 
-    private void HandleSetTable(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
+    private void HandlePropertyAssignment(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
     {
-        var obj = GetRegister(regs, ins.A)?.ToString();
+        var obj = GetRegister(regs, ins.A);
         var key = GetRk(regs, f, ins.B)?.ToString().Trim('"');
         var value = FormatValue(GetRk(regs, f, ins.C));
         
-        if (!string.IsNullOrEmpty(obj) && !string.IsNullOrEmpty(key))
+        if (obj != null && key != null)
         {
             statements.Add(new AssignNode($"{obj}.{key}", value, false));
         }
     }
 
-    private void HandleSelf(Dictionary<int, object> regs, Instruction ins, Function f)
+    private void HandleSelfCall(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
     {
         var obj = GetRegister(regs, ins.B);
         var method = GetRk(regs, f, ins.C)?.ToString().Trim('"');
         
         if (obj != null && method != null)
         {
+            // Store the object for the method call
             regs[ins.A + 1] = obj;
             regs[ins.A] = $"{obj}:{method}";
         }
@@ -308,77 +282,114 @@ public class Disassembler
 
     private void HandleCall(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
     {
-        var func = GetRegister(regs, ins.A)?.ToString();
+        var func = GetRegister(regs, ins.A);
         var args = Enumerable.Range(ins.A + 1, Math.Max(0, ins.B - 1))
                            .Select(r => GetRegister(regs, r)).ToList();
         
+        if (func == null) return;
+
+        string funcStr = func.ToString();
         var argsFormatted = args.Select(FormatValue).ToList();
 
-        if (string.IsNullOrEmpty(func))
+        // UI Library loadstring pattern
+        if (funcStr == "loadstring" && args.Count > 0)
         {
-            statements.Add(new RawNode($"-- Unknown function call"));
-            return;
-        }
-
-        // UI Library pattern detection
-        if (func == "Library" && args.Count >= 2)
-        {
-            string method = args[0].ToString().Trim('"');
-            string arg = argsFormatted.Count > 1 ? argsFormatted[1] : "";
-            statements.Add(new RawNode($"Window:{method}({arg}, function() -- UI Element"));
-            _builder.AppendLine("    -- [UI Element Created]");
-            return;
-        }
-
-        // Method call formatting
-        if (func.Contains(":"))
-        {
-            if (ins.C > 1) // Has return value
+            string httpGetCall = args[0].ToString();
+            if (httpGetCall.Contains("game:HttpGet"))
             {
-                string varName = func.Split(':')[0];
-                statements.Add(new AssignNode(varName, $"{func}({string.Join(", ", argsFormatted)})", false));
-                regs[ins.A] = varName;
+                var match = Regex.Match(httpGetCall, @"game:HttpGet\((""[^""]+"")\)");
+                if (match.Success)
+                {
+                    string url = match.Groups[1].Value;
+                    _state.LastHttpUrl = url.Trim('"');
+                    _state.StringRefs.Add(new StringRef { Value = _state.LastHttpUrl, Hint = "HTTP URL" });
+                    
+                    statements.Add(new AssignNode("Library", $"loadstring(game:HttpGet({match.Groups[1].Value}))()", true));
+                    regs[ins.A] = "Library";
+                    return;
+                }
+            }
+        }
+
+        // UI Method calls
+        if (funcStr.StartsWith("Library:") || funcStr.StartsWith("Window:"))
+        {
+            string methodCall = funcStr;
+            if (args.Count > 0)
+            {
+                string firstArg = argsFormatted[0];
+                // Remove duplicate self argument
+                if (firstArg == funcStr.Split(':')[0])
+                {
+                    argsFormatted.RemoveAt(0);
+                }
+            }
+
+            string resultVar = null;
+            if (funcStr.Contains("CreateWindow") || funcStr.Contains("CreateTab"))
+            {
+                resultVar = funcStr.Contains("CreateWindow") ? "Window" : "Tab";
+            }
+
+            if (resultVar != null)
+            {
+                statements.Add(new AssignNode(resultVar, $"{methodCall}({string.Join(", ", argsFormatted)})", true));
+                regs[ins.A] = resultVar;
             }
             else
             {
-                statements.Add(new CallNode(func, argsFormatted, true));
+                statements.Add(new CallNode(methodCall, argsFormatted, true));
             }
-        }
-        else if (func.StartsWith("game:GetService"))
-        {
-            // Skip - already handled
             return;
+        }
+
+        // Remote call tracking
+        if (funcStr.Contains("FireServer"))
+        {
+            _state.CallGraph.Add(new RemoteCall { Type = "RemoteEvent", Name = funcStr, Args = args.ToList<object>() });
+        }
+        else if (funcStr.Contains("InvokeServer"))
+        {
+            _state.CallGraph.Add(new RemoteCall { Type = "RemoteFunction", Name = funcStr, Args = args.ToList<object>() });
+        }
+
+        // Regular function calls
+        if (funcStr.EndsWith(")")) // Already formatted
+        {
+            statements.Add(new RawNode(funcStr));
         }
         else
         {
-            statements.Add(new CallNode(func, argsFormatted));
+            statements.Add(new CallNode(funcStr, argsFormatted));
         }
 
-        // Track remote calls
-        if (func.Contains("FireServer"))
+        // Handle return value
+        if (ins.C - 1 > 0)
         {
-            _state.CallGraph.Add(new RemoteCall { Type = "RemoteEvent", Name = func, Args = args.ToList<object>() });
+            regs[ins.A] = $"result_{++_state.ProxyId}";
         }
     }
 
-    private string FormatNode(AstNode node, string indent)
-    {
-        return node switch
-        {
-            AssignNode a => $"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}{(a.Comment != null ? $" -- {a.Comment}" : "")}",
-            CallNode c => $"{indent}{c.Func}({string.Join(", ", c.Args)})",
-            RawNode r => $"{indent}{r.Code}{(r.Comment != null ? $" -- {r.Comment}" : "")}",
-            CommentNode c => $"{indent}-- {c.Text}",
-            _ => ""
-        };
-    }
-
-    private void PrintBlock(Block block)
+    private void ProcessBlock(Block block)
     {
         foreach (var node in block.Statements)
         {
-            _builder.AppendLine(FormatNode(node, new string(' ', _indent * 4)));
+            _builder.AppendLine(FormatNode(node, _indentLevel));
         }
+    }
+
+    private string FormatNode(AstNode node, int indent)
+    {
+        string prefix = new string(' ', indent * 4);
+        return node switch
+        {
+            AssignNode a => $"{prefix}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right};{(a.Comment != null ? $" -- {a.Comment}" : "")}",
+            CallNode c when c.IsMethodCall => $"{prefix}{c.Func}({string.Join(", ", c.Args)});",
+            CallNode c => $"{prefix}{(c.AssignTo != null ? $"local {c.AssignTo} = " : "")}{c.Func}({string.Join(", ", c.Args)});",
+            RawNode r => $"{prefix}{r.Code};{(r.Comment != null ? $" -- {r.Comment}" : "")}",
+            CommentNode c => $"{prefix}-- {c.Text}",
+            _ => ""
+        };
     }
 
     private object GetRegister(Dictionary<int, object> regs, int r) => 
@@ -390,6 +401,7 @@ public class Disassembler
     private string FormatValue(object val)
     {
         if (val is string s) return $"\"{s}\"";
+        if (val is bool b) return b.ToString().ToLower();
         return val?.ToString() ?? "nil";
     }
 
