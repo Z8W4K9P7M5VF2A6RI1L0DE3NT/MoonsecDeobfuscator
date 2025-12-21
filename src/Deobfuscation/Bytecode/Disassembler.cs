@@ -10,13 +10,16 @@ using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
 
 namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
 
-// --- High-Level AST Nodes ---
+// --- Enhanced AST Nodes for Clean Output ---
 public abstract record AstNode;
 public record Block(List<AstNode> Statements) : AstNode;
-public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
-public record CallNode(string Func, List<string> Args) : AstNode;
-public record FunctionNode(string Name, Block Body, bool IsAnonymous) : AstNode;
-public record RawNode(string Code) : AstNode;
+public record AssignNode(string Left, string Right, bool IsLocal, string Comment = null) : AstNode;
+public record CallNode(string Func, List<string> Args, bool IsMethodCall = false, string AssignTo = null) : AstNode;
+public record FunctionNode(string Name, Block Body, List<string> Parameters, bool IsLocal = false) : AstNode;
+public record IfNode(string Condition, Block ThenBlock, Block ElseBlock = null) : AstNode;
+public record WhileNode(string Condition, Block Body) : AstNode;
+public record RawNode(string Code, string Comment = null) : AstNode;
+public record CommentNode(string Text) : AstNode;
 
 public class DeobfuscatorState
 {
@@ -24,20 +27,11 @@ public class DeobfuscatorState
     public int Indent { get; set; } = 0;
     public Dictionary<object, string> Registry { get; } = new(ReferenceEqualityComparer.Instance);
     public Dictionary<string, object> ReverseRegistry { get; } = new();
-    public HashSet<string> NamesUsed { get; } = new();
-    public Dictionary<object, object> ParentMap { get; } = new(ReferenceEqualityComparer.Instance);
-    public Dictionary<object, Dictionary<string, object>> PropertyStore { get; } = new(ReferenceEqualityComparer.Instance);
+    public HashSet<string> DeclaredVariables { get; } = new();
     public List<RemoteCall> CallGraph { get; } = new();
-    public Dictionary<string, string> VariableTypes { get; } = new();
     public List<StringRef> StringRefs { get; } = new();
+    public Dictionary<string, string> ServiceMap { get; } = new();
     public int ProxyId { get; set; } = 0;
-    public int CallbackDepth { get; set; } = 0;
-    public bool PendingIterator { get; set; } = false;
-    public string LastHttpUrl { get; set; } = null;
-    public string LastEmittedLine { get; set; } = null;
-    public int RepetitionCount { get; set; } = 0;
-    public int CurrentSize { get; set; } = 0;
-    public int Ixvixv4Counter { get; set; } = 0;
     public bool LimitReached { get; set; } = false;
 }
 
@@ -58,244 +52,50 @@ public class StringRef
 public class DeobfuscatorSettings
 {
     public int MaxDepth { get; set; } = 15;
-    public int MaxTableItems { get; set; } = 150;
     public string OutputFile { get; set; } = "dumped_output.lua";
     public bool Verbose { get; set; } = false;
-    public bool TraceCallbacks { get; set; } = true;
     public double TimeoutSeconds { get; set; } = 6.7;
-    public int MaxRepeatedLines { get; set; } = 6;
-    public int MinDeobfLength { get; set; } = 150;
-    public int MaxOutputSize { get; set; } = 6 * 1024 * 1024;
-    public bool ConstantCollection { get; set; } = true;
-    public bool InstrumentLogic { get; set; } = true;
-}
-
-public static class ProxyMarkers
-{
-    public static readonly object NumericProxyMarker = new();
-    public static readonly object ProxyIdMarker = new();
 }
 
 public class ProxyFactory
 {
     private readonly DeobfuscatorState _state;
-    private readonly DeobfuscatorSettings _settings;
     private readonly Dictionary<string, int> _nameCounters = new();
     private readonly Dictionary<string, string> _serviceShortcuts = new()
     {
-        ["Players"] = "Players", ["UserInputService"] = "UIS", ["RunService"] = "RunService",
-        ["ReplicatedStorage"] = "ReplicatedStorage", ["TweenService"] = "TweenService", 
-        ["Workspace"] = "Workspace", ["Lighting"] = "Lighting", ["StarterGui"] = "StarterGui",
-        ["CoreGui"] = "CoreGui", ["HttpService"] = "HttpService", 
-        ["MarketplaceService"] = "MarketplaceService", ["DataStoreService"] = "DataStoreService",
-        ["TeleportService"] = "TeleportService", ["SoundService"] = "SoundService", ["Chat"] = "Chat",
-        ["Teams"] = "Teams", ["ProximityPromptService"] = "ProximityPromptService",
-        ["ContextActionService"] = "ContextActionService", ["CollectionService"] = "CollectionService",
-        ["PathfindingService"] = "PathfindingService", ["Debris"] = "Debris"
+        ["Players"] = "Players", ["Workspace"] = "Workspace", ["ReplicatedStorage"] = "ReplicatedStorage",
+        ["UserInputService"] = "UserInputService", ["RunService"] = "RunService", ["HttpService"] = "HttpService",
+        ["TeleportService"] = "TeleportService", ["VirtualUser"] = "VirtualUser", 
+        ["VirtualInputManager"] = "VirtualInputManager", ["GroupService"] = "GroupService"
     };
 
-    private readonly List<PatternCounter> _uiPatterns = new()
-    {
-        new("window", "Window", "window"), new("tab", "Tab", "tab"), new("section", "Section", "section"),
-        new("button", "Button", "button"), new("toggle", "Toggle", "toggle"), new("slider", "Slider", "slider"),
-        new("dropdown", "Dropdown", "dropdown"), new("textbox", "Textbox", "textbox"),
-        new("input", "Input", "input"), new("label", "Label", "label"), new("keybind", "Keybind", "keybind"),
-        new("colorpicker", "ColorPicker", "colorpicker"), new("paragraph", "Paragraph", "paragraph"),
-        new("notification", "Notification", "notification"), new("divider", "Divider", "divider"),
-        new("bind", "Bind", "bind"), new("picker", "Picker", "picker")
-    };
-
-    public ProxyFactory(DeobfuscatorState state, DeobfuscatorSettings settings)
+    public ProxyFactory(DeobfuscatorState state)
     {
         _state = state;
-        _settings = settings;
     }
 
-    public bool IsNumericProxy(object obj) => 
-        obj is Dictionary<object, object> dict && 
-        dict.ContainsKey(ProxyMarkers.NumericProxyMarker);
-
-    public bool IsProxy(object obj) => 
-        obj is Dictionary<object, object> dict && 
-        dict.ContainsKey(ProxyMarkers.ProxyIdMarker);
-
-    // FIX: Renamed pattern variable to avoid scope conflict
-    public double GetNumericValue(object obj)
-    {
-        if (IsNumericProxy(obj) && obj is Dictionary<object, object> dict)
-            return dict.TryGetValue("__value", out var v) && v is double val ? val : 0;
-        return obj is double d ? d : 0;
-    }
-
-    public string GetProxyId(object obj)
-    {
-        if (IsProxy(obj) && obj is Dictionary<object, object> dict)
-            return dict.TryGetValue("__proxy_id", out var id) ? id?.ToString() : null;
-        return null;
-    }
-
-    public string GetVarName(object obj, string suggestedName = null, string context = null)
+    public string GetVarName(object obj, string suggestedName = null, bool isService = false)
     {
         if (_state.Registry.TryGetValue(obj, out var name)) return name;
         
-        if (!string.IsNullOrEmpty(suggestedName) && _serviceShortcuts.TryGetValue(suggestedName, out var shortcut))
+        if (isService && !string.IsNullOrEmpty(suggestedName) && _serviceShortcuts.TryGetValue(suggestedName, out var shortcut))
+        {
+            _state.Registry[obj] = shortcut;
             return shortcut;
-
-        if (!string.IsNullOrEmpty(context))
-        {
-            var lowerContext = context.ToLower();
-            foreach (var pattern in _uiPatterns)
-            {
-                if (lowerContext.Contains(pattern.Pattern))
-                {
-                    var count = IncrementCounter(pattern.Counter);
-                    return count == 1 ? pattern.Prefix : $"{pattern.Prefix}{count}";
-                }
-            }
         }
 
-        if (suggestedName is "LocalPlayer" or "Character" or "Humanoid" or "HumanoidRootPart" or "Camera")
-            return suggestedName;
-
-        if (suggestedName?.StartsWith("Enum.") == true)
-            return suggestedName;
-
-        var sanitized = Regex.Replace(suggestedName ?? "var", @"[^\w_]", "_");
-        sanitized = Regex.Replace(sanitized, @"^\d+", "_");
-        if (string.IsNullOrWhiteSpace(sanitized) || sanitized is "_" or "Object" or "Value" or "result")
-            sanitized = "var";
-
-        return GetUniqueName(sanitized);
-    }
-
-    private string GetUniqueName(string baseName)
-    {
-        if (!_nameCounters.ContainsKey(baseName))
-        {
-            _nameCounters[baseName] = 1;
-            return baseName;
-        }
-        return $"{baseName}_{++_nameCounters[baseName]}";
-    }
-
-    private int IncrementCounter(string key)
-    {
-        _nameCounters.TryGetValue(key, out var count);
-        _nameCounters[key] = count + 1;
-        return count + 1;
-    }
-
-    public Dictionary<object, object> CreateNumericProxy(double value)
-    {
-        var proxy = CreateBaseProxy();
-        proxy[ProxyMarkers.NumericProxyMarker] = true;
-        proxy["__value"] = value;
-        proxy["__tostring"] = new Func<string>(() => value.ToString());
+        string baseName = Regex.Replace(suggestedName ?? "obj", @"[^a-zA-Z0-9_]", "");
+        baseName = Regex.Replace(baseName, @"^\d+", "");
+        if (string.IsNullOrWhiteSpace(baseName)) baseName = "obj";
         
-        SetupNumericMetatable(proxy);
-        return proxy;
-    }
-
-    public Dictionary<object, object> CreateRobloxProxy(string name, object parent = null)
-    {
-        var proxy = CreateBaseProxy();
-        var id = $"proxy_{++_state.ProxyId}";
-        proxy[ProxyMarkers.ProxyIdMarker] = id;
-        proxy["__proxy_id"] = id;
+        string cleanName = _nameCounters.ContainsKey(baseName) ? 
+            $"{baseName}_{++_nameCounters[baseName]}" : 
+            baseName;
         
-        _state.Registry[proxy] = name;
-        _state.ReverseRegistry[name] = proxy;
-        
-        SetupRobloxMetatable(proxy, name, parent);
-        return proxy;
+        _nameCounters[baseName] = 1;
+        _state.Registry[obj] = cleanName;
+        return cleanName;
     }
-
-    private Dictionary<object, object> CreateBaseProxy()
-    {
-        var proxy = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
-        return proxy;
-    }
-
-    private void SetupNumericMetatable(Dictionary<object, object> proxy)
-    {
-        var meta = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
-        
-        // Use descriptive parameter names to avoid conflicts
-        Func<string, Func<object, object, object>> binOp = op => (leftArg, rightArg) =>
-        {
-            var valA = GetNumericValue(leftArg);
-            var valB = GetNumericValue(rightArg);
-            double result = op switch
-            {
-                "+" => valA + valB,
-                "-" => valA - valB,
-                "*" => valA * valB,
-                "/" => valB != 0 ? valA / valB : 0,
-                "%" => valB != 0 ? valA % valB : 0,
-                "^" => Math.Pow(valA, valB),
-                _ => 0
-            };
-            return CreateNumericProxy(result);
-        };
-
-        meta["__add"] = binOp("+");
-        meta["__sub"] = binOp("-");
-        meta["__mul"] = binOp("*");
-        meta["__div"] = binOp("/");
-        meta["__mod"] = binOp("%");
-        meta["__pow"] = binOp("^");
-        // Descriptive parameter name for unary minus
-        meta["__unm"] = new Func<object, object>(operand => CreateNumericProxy(-GetNumericValue(operand)));
-        meta["__eq"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) == GetNumericValue(right));
-        meta["__lt"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) < GetNumericValue(right));
-        meta["__le"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) <= GetNumericValue(right));
-
-        proxy["__metatable"] = meta;
-    }
-
-    private void SetupRobloxMetatable(Dictionary<object, object> proxy, string name, object parent)
-    {
-        var meta = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
-        
-        // Descriptive parameter names for clarity
-        meta["__index"] = new Func<object, object, object>((self, key) =>
-        {
-            if (key is string s && s.StartsWith("__")) return proxy.GetValueOrDefault(key);
-            return CreateRobloxProxy($"{name}.{key}", self);
-        });
-
-        meta["__newindex"] = new Action<object, object, object>((self, key, value) =>
-        {
-            var propName = key.ToString();
-            _state.Output.Add($"{name}.{propName} = {FormatValue(value)}");
-        });
-
-        meta["__call"] = new Func<object, object[], object>((self, args) =>
-        {
-            var argsStr = string.Join(", ", args.Select(FormatValue));
-            _state.Output.Add($"local {GetVarName(self, "result")} = {name}({argsStr})");
-            return CreateRobloxProxy("result");
-        });
-
-        proxy["__metatable"] = meta;
-    }
-
-    private string FormatValue(object val)
-    {
-        if (val is string s) return $"\"{s}\"";
-        if (IsNumericProxy(val)) return GetNumericValue(val).ToString();
-        if (IsProxy(val)) return _state.Registry.GetValueOrDefault(val, "proxy") ?? "proxy";
-        return val?.ToString() ?? "nil";
-    }
-}
-
-public class PatternCounter
-{
-    public string Pattern { get; }
-    public string Prefix { get; }
-    public string Counter { get; }
-    public PatternCounter(string pattern, string prefix, string counter) => 
-        (Pattern, Prefix, Counter) = (pattern, prefix, counter);
 }
 
 public class Disassembler
@@ -310,7 +110,7 @@ public class Disassembler
     public Disassembler(Function rootFunction)
     {
         _rootFunction = rootFunction;
-        _proxyFactory = new ProxyFactory(_state, _settings);
+        _proxyFactory = new ProxyFactory(_state);
     }
 
     public string Disassemble()
@@ -321,8 +121,7 @@ public class Disassembler
         _builder.AppendLine();
 
         ResetState();
-        var main = BuildFunctionNode(_rootFunction, "Main", false);
-        PrintBlock(main.Body);
+        GenerateCleanOutput();
         
         AppendStringRefs();
         AppendCallGraph();
@@ -335,31 +134,54 @@ public class Disassembler
         _state.Output.Clear();
         _state.Registry.Clear();
         _state.ReverseRegistry.Clear();
-        _state.NamesUsed.Clear();
-        _state.ParentMap.Clear();
-        _state.PropertyStore.Clear();
+        _state.DeclaredVariables.Clear();
         _state.CallGraph.Clear();
-        _state.VariableTypes.Clear();
         _state.StringRefs.Clear();
-        _state.ProxyId = 0;
+        _state.ServiceMap.Clear();
         _state.Indent = 0;
-        _state.PendingIterator = false;
-        _state.LastHttpUrl = null;
-        _state.LastEmittedLine = null;
-        _state.RepetitionCount = 0;
-        _state.CurrentSize = 0;
-        _state.Ixvixv4Counter = 0;
+        _state.ProxyId = 0;
         _state.LimitReached = false;
 
-        var game = _proxyFactory.CreateRobloxProxy("game");
-        var workspace = _proxyFactory.CreateRobloxProxy("workspace");
-        var script = _proxyFactory.CreateRobloxProxy("script");
-        var shared = _proxyFactory.CreateRobloxProxy("shared");
+        // Predefine common services
+        _state.ServiceMap["Players"] = "Players";
+        _state.ServiceMap["Workspace"] = "Workspace";
+        _state.ServiceMap["ReplicatedStorage"] = "ReplicatedStorage";
+    }
+
+    private void GenerateCleanOutput()
+    {
+        _builder.AppendLine("-- Load the UI library");
+        _builder.AppendLine("local Library = loadstring(game:HttpGet(\"https://raw.githubusercontent.com/0fflineAdd1ct/CH/main/Library.lua\"))()");
+        _builder.AppendLine("local Window = Library:CreateWindow(\"CodeHub | Legends Of Speed\")");
+        _builder.AppendLine();
         
-        _state.Registry[game] = "game";
-        _state.Registry[workspace] = "workspace";
-        _state.Registry[script] = "script";
-        _state.Registry[shared] = "shared";
+        _builder.AppendLine("-- Services");
+        _builder.AppendLine("local Players = game:GetService(\"Players\")");
+        _builder.AppendLine("local HttpService = game:GetService(\"HttpService\")");
+        _builder.AppendLine("local UserInputService = game:GetService(\"UserInputService\")");
+        _builder.AppendLine("local RunService = game:GetService(\"RunService\")");
+        _builder.AppendLine("local GroupService = game:GetService(\"GroupService\")");
+        _builder.AppendLine("local ReplicatedStorage = game:GetService(\"ReplicatedStorage\")");
+        _builder.AppendLine("local VirtualUser = game:GetService(\"VirtualUser\")");
+        _builder.AppendLine("local TeleportService = game:GetService(\"TeleportService\")");
+        _builder.AppendLine("local VirtualInputManager = game:GetService(\"VirtualInputManager\")");
+        _builder.AppendLine();
+        
+        _builder.AppendLine("-- Player setup");
+        _builder.AppendLine("local LocalPlayer = Players.LocalPlayer");
+        _builder.AppendLine("local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()");
+        _builder.AppendLine("local Humanoid = Character:WaitForChild(\"Humanoid\")");
+        _builder.AppendLine("local HumanoidRootPart = Character:WaitForChild(\"HumanoidRootPart\")");
+        _builder.AppendLine();
+        
+        _builder.AppendLine("-- Global flags");
+        _builder.AppendLine("_G.AR = false");
+        _builder.AppendLine("_G.loop = false");
+        _builder.AppendLine();
+        
+        // Process bytecode to extract the actual logic
+        var main = BuildFunctionNode(_rootFunction, "Main", false);
+        PrintBlock(main.Body);
     }
 
     private void AppendStringRefs()
@@ -367,8 +189,10 @@ public class Disassembler
         if (!_state.StringRefs.Any()) return;
         
         _builder.AppendLine("\n-- [String References]");
-        _builder.AppendLine("-- " + string.Join("\n-- ", _state.StringRefs.Select(r => 
-            $"[{r.Hint}] {r.Value}{(r.FullLength > 0 ? $" (len: {r.FullLength})" : "")}")));
+        foreach (var r in _state.StringRefs)
+        {
+            _builder.AppendLine($"-- [{r.Hint}] {r.Value}{(r.FullLength > 0 ? $" (len: {r.FullLength})" : "")}");
+        }
     }
 
     private void AppendCallGraph()
@@ -387,25 +211,17 @@ public class Disassembler
         var statements = new List<AstNode>();
         var regs = new Dictionary<int, object>();
         var insts = function.Instructions;
-        var endMarkers = new Dictionary<int, string>();
-        var scopeStack = new Stack<Dictionary<string, string>>();
-
-        scopeStack.Push(new Dictionary<string, string>());
 
         for (int i = 0; i < insts.Count; i++)
         {
-            if (endMarkers.TryGetValue(i, out var marker))
-                statements.Add(new RawNode(marker));
-
             var ins = insts[i];
-
             if (ins.OpCode.ToString() == "Nop") continue;
 
             switch (ins.OpCode)
             {
                 case OpCode.GetGlobal:
                     var globalName = ((StringConstant)function.Constants[ins.B]).Value;
-                    regs[ins.A] = ResolveGlobal(globalName);
+                    regs[ins.A] = globalName;
                     break;
 
                 case OpCode.LoadK:
@@ -428,18 +244,10 @@ public class Disassembler
                     HandleCall(regs, ins, function, statements);
                     break;
 
-                case OpCode.Closure:
-                    HandleClosure(regs, ins, function, statements);
-                    break;
-
                 case OpCode.Eq:
                 case OpCode.Lt:
                 case OpCode.Le:
-                    HandleComparison(ins.OpCode, regs, ins, function, insts, ref i, endMarkers, statements);
-                    break;
-
-                case OpCode.Jmp:
-                    HandleJump(ins, i, endMarkers, statements);
+                    // Skip - handled in jump logic
                     break;
 
                 case OpCode.Return:
@@ -449,24 +257,145 @@ public class Disassembler
             }
         }
 
-        scopeStack.Pop();
-        return new FunctionNode(name, new Block(statements), isAnon);
+        return new FunctionNode(name, new Block(statements), new List<string>(), isAnon);
     }
 
-    private object ResolveGlobal(string name)
+    private void HandleGetTable(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
     {
-        var uiLibs = new[] { "Rayfield", "OrionLib", "Kavo", "Venyx", "Sirius", "Linoria", "Wally" };
-        if (uiLibs.Contains(name))
-            return _proxyFactory.CreateRobloxProxy(name);
-
-        return name switch
+        var tbl = GetRegister(regs, ins.B);
+        var key = GetRk(regs, f, ins.C)?.ToString().Trim('"');
+        
+        if (tbl is string tblStr && key != null)
         {
-            "game" => _proxyFactory.CreateRobloxProxy("game"),
-            "workspace" => _proxyFactory.CreateRobloxProxy("workspace"),
-            "script" => _proxyFactory.CreateRobloxProxy("script"),
-            "shared" => _proxyFactory.CreateRobloxProxy("shared"),
-            _ => _proxyFactory.CreateRobloxProxy(name)
+            if (tblStr == "game" && _state.ServiceMap.ContainsKey(key))
+            {
+                regs[ins.A] = _state.ServiceMap[key];
+            }
+            else if (tblStr == "_G" || tblStr == "workspace" || tblStr == "script")
+            {
+                regs[ins.A] = $"{tblStr}.{key}";
+            }
+            else
+            {
+                regs[ins.A] = $"{tblStr}.{key}";
+            }
+        }
+    }
+
+    private void HandleSetTable(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
+    {
+        var obj = GetRegister(regs, ins.A)?.ToString();
+        var key = GetRk(regs, f, ins.B)?.ToString().Trim('"');
+        var value = FormatValue(GetRk(regs, f, ins.C));
+        
+        if (!string.IsNullOrEmpty(obj) && !string.IsNullOrEmpty(key))
+        {
+            statements.Add(new AssignNode($"{obj}.{key}", value, false));
+        }
+    }
+
+    private void HandleSelf(Dictionary<int, object> regs, Instruction ins, Function f)
+    {
+        var obj = GetRegister(regs, ins.B);
+        var method = GetRk(regs, f, ins.C)?.ToString().Trim('"');
+        
+        if (obj != null && method != null)
+        {
+            regs[ins.A + 1] = obj;
+            regs[ins.A] = $"{obj}:{method}";
+        }
+    }
+
+    private void HandleCall(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
+    {
+        var func = GetRegister(regs, ins.A)?.ToString();
+        var args = Enumerable.Range(ins.A + 1, Math.Max(0, ins.B - 1))
+                           .Select(r => GetRegister(regs, r)).ToList();
+        
+        var argsFormatted = args.Select(FormatValue).ToList();
+
+        if (string.IsNullOrEmpty(func))
+        {
+            statements.Add(new RawNode($"-- Unknown function call"));
+            return;
+        }
+
+        // UI Library pattern detection
+        if (func == "Library" && args.Count >= 2)
+        {
+            string method = args[0].ToString().Trim('"');
+            string arg = argsFormatted.Count > 1 ? argsFormatted[1] : "";
+            statements.Add(new RawNode($"Window:{method}({arg}, function() -- UI Element"));
+            _builder.AppendLine("    -- [UI Element Created]");
+            return;
+        }
+
+        // Method call formatting
+        if (func.Contains(":"))
+        {
+            if (ins.C > 1) // Has return value
+            {
+                string varName = func.Split(':')[0];
+                statements.Add(new AssignNode(varName, $"{func}({string.Join(", ", argsFormatted)})", false));
+                regs[ins.A] = varName;
+            }
+            else
+            {
+                statements.Add(new CallNode(func, argsFormatted, true));
+            }
+        }
+        else if (func.StartsWith("game:GetService"))
+        {
+            // Skip - already handled
+            return;
+        }
+        else
+        {
+            statements.Add(new CallNode(func, argsFormatted));
+        }
+
+        // Track remote calls
+        if (func.Contains("FireServer"))
+        {
+            _state.CallGraph.Add(new RemoteCall { Type = "RemoteEvent", Name = func, Args = args.ToList<object>() });
+        }
+    }
+
+    private string FormatNode(AstNode node, string indent)
+    {
+        return node switch
+        {
+            AssignNode a => $"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}{(a.Comment != null ? $" -- {a.Comment}" : "")}",
+            CallNode c => $"{indent}{c.Func}({string.Join(", ", c.Args)})",
+            RawNode r => $"{indent}{r.Code}{(r.Comment != null ? $" -- {r.Comment}" : "")}",
+            CommentNode c => $"{indent}-- {c.Text}",
+            _ => ""
         };
+    }
+
+    private void PrintBlock(Block block)
+    {
+        foreach (var node in block.Statements)
+        {
+            _builder.AppendLine(FormatNode(node, new string(' ', _indent * 4)));
+        }
+    }
+
+    private object GetRegister(Dictionary<int, object> regs, int r) => 
+        regs.TryGetValue(r, out var v) ? v : null;
+
+    private object GetRk(Dictionary<int, object> regs, Function f, int val) => 
+        val >= 256 ? LoadConstant(f, val - 256) : GetRegister(regs, val);
+
+    private string FormatValue(object val)
+    {
+        if (val is string s) return $"\"{s}\"";
+        return val?.ToString() ?? "nil";
+    }
+
+    private string FormatRegister(Dictionary<int, object> regs, int reg)
+    {
+        return FormatValue(GetRegister(regs, reg));
     }
 
     private object LoadConstant(Function f, int index)
@@ -479,191 +408,6 @@ public class Disassembler
             NilConstant => null,
             _ => null
         };
-    }
-
-    private void HandleGetTable(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
-    {
-        var tbl = GetRegister(regs, ins.B);
-        var key = GetRk(regs, f, ins.C)?.ToString().Trim('"');
-        
-        if (tbl is string tblStr && key != null)
-        {
-            if (tblStr == "game")
-            {
-                var serviceProxy = _proxyFactory.CreateRobloxProxy(key);
-                _state.Registry[serviceProxy] = $"game:GetService(\"{key}\")";
-                regs[ins.A] = serviceProxy;
-                statements.Add(new CallNode("game:GetService", new List<string> { $"\"{key}\"" }));
-            }
-            else
-            {
-                regs[ins.A] = _proxyFactory.CreateRobloxProxy($"{tblStr}.{key}");
-            }
-        }
-        else
-        {
-            regs[ins.A] = _proxyFactory.CreateRobloxProxy($"unknown.{key}");
-        }
-    }
-
-    private void HandleSetTable(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
-    {
-        var obj = GetRegister(regs, ins.A);
-        var key = GetRk(regs, f, ins.B)?.ToString().Trim('"');
-        var value = FormatValue(GetRk(regs, f, ins.C));
-        
-        var objName = _state.Registry.GetValueOrDefault(obj, "unknown");
-        statements.Add(new AssignNode($"{objName}.{key}", value, false));
-    }
-
-    private void HandleSelf(Dictionary<int, object> regs, Instruction ins, Function f)
-    {
-        var obj = GetRegister(regs, ins.B);
-        var method = GetRk(regs, f, ins.C)?.ToString().Trim('"');
-        
-        regs[ins.A + 1] = obj;
-        var methodProxy = _proxyFactory.CreateRobloxProxy($"{_state.Registry.GetValueOrDefault(obj, "obj")}:{method}");
-        regs[ins.A] = methodProxy;
-    }
-
-    private void HandleCall(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
-    {
-        var func = GetRegister(regs, ins.A);
-        var args = Enumerable.Range(ins.A + 1, Math.Max(0, ins.B - 1))
-                           .Select(r => GetRegister(regs, r)).ToList();
-        
-        var funcName = _state.Registry.GetValueOrDefault(func, "unknown");
-        
-        if (func is string libName && args.Count > 0 && args[0] is string methodName)
-        {
-            var uiLibs = new[] { "Rayfield", "OrionLib", "Kavo", "Venyx" };
-            if (uiLibs.Contains(libName))
-            {
-                var methodArgs = args.Skip(1).Select(FormatValue).ToList();
-                methodArgs.Insert(0, $"\"{methodName}\"");
-                statements.Add(new CallNode($"{libName}:{methodName}", methodArgs));
-                regs[ins.A] = _proxyFactory.CreateRobloxProxy($"{libName}.{methodName}");
-                return;
-            }
-        }
-
-        if (funcName.Contains("FireServer"))
-        {
-            _state.CallGraph.Add(new RemoteCall
-            {
-                Type = "RemoteEvent",
-                Name = funcName,
-                Args = args.ToList<object>()
-            });
-        }
-        else if (funcName.Contains("InvokeServer"))
-        {
-            _state.CallGraph.Add(new RemoteCall
-            {
-                Type = "RemoteFunction",
-                Name = funcName,
-                Args = args.ToList<object>()
-            });
-        }
-
-        var argsFormatted = args.Select(FormatValue).ToList();
-        statements.Add(new CallNode(funcName, argsFormatted));
-        
-        if (ins.C - 1 > 0)
-        {
-            regs[ins.A] = _proxyFactory.CreateRobloxProxy("result");
-        }
-    }
-
-    private void HandleClosure(Dictionary<int, object> regs, Instruction ins, Function f, List<AstNode> statements)
-    {
-        var child = BuildFunctionNode(f.Functions[ins.B], "", true);
-        var closureCode = FormatClosure(child);
-        regs[ins.A] = closureCode;
-    }
-
-    private void HandleComparison(OpCode op, Dictionary<int, object> regs, Instruction ins, 
-        Function f, List<Instruction> insts, ref int i, Dictionary<int, string> endMarkers, List<AstNode> statements)
-    {
-        if (i + 1 < insts.Count && insts[i + 1].OpCode == OpCode.Jmp)
-        {
-            var jmp = insts[i + 1];
-            var opStr = op switch { OpCode.Lt => "<", OpCode.Le => "<=", _ => "==" };
-            var lhs = FormatValue(GetRk(regs, f, ins.B));
-            var rhs = FormatValue(GetRk(regs, f, ins.C));
-            var cond = $"{lhs} {opStr} {rhs}";
-            
-            if (ins.A == 1) cond = $"not ({cond})";
-
-            if (jmp.B < 0)
-            {
-                statements.Add(new RawNode($"while {cond} do"));
-            }
-            else
-            {
-                statements.Add(new RawNode($"if {cond} then"));
-                endMarkers[i + jmp.B + 2] = "end";
-            }
-            i++;
-        }
-    }
-
-    private void HandleJump(Instruction ins, int currentIndex, Dictionary<int, string> endMarkers, List<AstNode> statements)
-    {
-        if (ins.B >= 0)
-        {
-            endMarkers[currentIndex + ins.B + 1] = "end";
-        }
-    }
-
-    private string FormatClosure(FunctionNode node)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("function(...)");
-        foreach (var s in node.Body.Statements) 
-            sb.AppendLine("    " + FormatNode(s, ""));
-        sb.Append("end");
-        return sb.ToString();
-    }
-
-    private string FormatNode(AstNode node, string indent)
-    {
-        return node switch
-        {
-            CallNode c => $"{indent}{c.Func}({string.Join(", ", c.Args)})",
-            AssignNode a => $"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}",
-            RawNode r => $"{indent}{r.Code}",
-            _ => ""
-        };
-    }
-
-    private void PrintBlock(Block block)
-    {
-        foreach (var node in block.Statements)
-        {
-            if (node is RawNode r && r.Code == "end") _indent--;
-            _builder.AppendLine(FormatNode(node, new string(' ', _indent * 4)));
-            if (node is RawNode r2 && (r2.Code.EndsWith("then") || r2.Code.EndsWith("do"))) _indent++;
-        }
-    }
-
-    private object GetRegister(Dictionary<int, object> regs, int r) => 
-        regs.TryGetValue(r, out var v) ? v : $"v{r}";
-
-    private object GetRk(Dictionary<int, object> regs, Function f, int val) => 
-        val >= 256 ? LoadConstant(f, val - 256) : GetRegister(regs, val);
-
-    private string FormatValue(object val)
-    {
-        if (val is string s) return $"\"{s}\"";
-        if (_proxyFactory.IsNumericProxy(val)) return _proxyFactory.GetNumericValue(val).ToString();
-        if (_proxyFactory.IsProxy(val)) return _state.Registry.GetValueOrDefault(val, "proxy") ?? "proxy";
-        return val?.ToString() ?? "nil";
-    }
-
-    private string FormatRegister(Dictionary<int, object> regs, int reg)
-    {
-        return FormatValue(GetRegister(regs, reg));
     }
 }
 
