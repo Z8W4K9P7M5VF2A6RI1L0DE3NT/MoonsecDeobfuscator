@@ -119,10 +119,11 @@ public class ProxyFactory
         obj is Dictionary<object, object> dict && 
         dict.ContainsKey(ProxyMarkers.ProxyIdMarker);
 
+    // FIX: Renamed pattern variable to avoid scope conflict
     public double GetNumericValue(object obj)
     {
         if (IsNumericProxy(obj) && obj is Dictionary<object, object> dict)
-            return dict.TryGetValue("__value", out var v) && v is double d ? d : 0;
+            return dict.TryGetValue("__value", out var v) && v is double val ? val : 0;
         return obj is double d ? d : 0;
     }
 
@@ -219,11 +220,11 @@ public class ProxyFactory
     {
         var meta = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
         
-        // FIX: Use descriptive parameter names to avoid conflicts
-        Func<string, Func<object, object, object>> binOp = op => (lhs, rhs) =>
+        // Use descriptive parameter names to avoid conflicts
+        Func<string, Func<object, object, object>> binOp = op => (leftArg, rightArg) =>
         {
-            var valA = GetNumericValue(lhs);
-            var valB = GetNumericValue(rhs);
+            var valA = GetNumericValue(leftArg);
+            var valB = GetNumericValue(rightArg);
             double result = op switch
             {
                 "+" => valA + valB,
@@ -243,7 +244,7 @@ public class ProxyFactory
         meta["__div"] = binOp("/");
         meta["__mod"] = binOp("%");
         meta["__pow"] = binOp("^");
-        // FIX: Use descriptive parameter name
+        // Descriptive parameter name for unary minus
         meta["__unm"] = new Func<object, object>(operand => CreateNumericProxy(-GetNumericValue(operand)));
         meta["__eq"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) == GetNumericValue(right));
         meta["__lt"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) < GetNumericValue(right));
@@ -256,7 +257,7 @@ public class ProxyFactory
     {
         var meta = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
         
-        // FIX: Use descriptive parameter names
+        // Descriptive parameter names for clarity
         meta["__index"] = new Func<object, object, object>((self, key) =>
         {
             if (key is string s && s.StartsWith("__")) return proxy.GetValueOrDefault(key);
