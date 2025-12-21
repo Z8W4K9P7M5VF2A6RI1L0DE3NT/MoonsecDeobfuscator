@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Runtime.CompilerServices; // FIX for RuntimeHelpers
+using System.Runtime.CompilerServices;
 using MoonsecDeobfuscator.Bytecode.Models;
 using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
 
@@ -219,10 +219,11 @@ public class ProxyFactory
     {
         var meta = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
         
-        Func<string, Func<object, object, object>> binOp = op => (a, b) =>
+        // FIX: Use descriptive parameter names to avoid conflicts
+        Func<string, Func<object, object, object>> binOp = op => (lhs, rhs) =>
         {
-            var valA = GetNumericValue(a);
-            var valB = GetNumericValue(b);
+            var valA = GetNumericValue(lhs);
+            var valB = GetNumericValue(rhs);
             double result = op switch
             {
                 "+" => valA + valB,
@@ -242,10 +243,11 @@ public class ProxyFactory
         meta["__div"] = binOp("/");
         meta["__mod"] = binOp("%");
         meta["__pow"] = binOp("^");
-        meta["__unm"] = new Func<object, object>(a => CreateNumericProxy(-GetNumericValue(a)));
-        meta["__eq"] = new Func<object, object, bool>((a, b) => GetNumericValue(a) == GetNumericValue(b));
-        meta["__lt"] = new Func<object, object, bool>((a, b) => GetNumericValue(a) < GetNumericValue(b));
-        meta["__le"] = new Func<object, object, bool>((a, b) => GetNumericValue(a) <= GetNumericValue(b));
+        // FIX: Use descriptive parameter name
+        meta["__unm"] = new Func<object, object>(operand => CreateNumericProxy(-GetNumericValue(operand)));
+        meta["__eq"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) == GetNumericValue(right));
+        meta["__lt"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) < GetNumericValue(right));
+        meta["__le"] = new Func<object, object, bool>((left, right) => GetNumericValue(left) <= GetNumericValue(right));
 
         proxy["__metatable"] = meta;
     }
@@ -254,6 +256,7 @@ public class ProxyFactory
     {
         var meta = new Dictionary<object, object>(ReferenceEqualityComparer.Instance);
         
+        // FIX: Use descriptive parameter names
         meta["__index"] = new Func<object, object, object>((self, key) =>
         {
             if (key is string s && s.StartsWith("__")) return proxy.GetValueOrDefault(key);
@@ -395,7 +398,6 @@ public class Disassembler
 
             var ins = insts[i];
 
-            // FIX: Check if Nop exists before using it
             if (ins.OpCode.ToString() == "Nop") continue;
 
             switch (ins.OpCode)
@@ -472,7 +474,7 @@ public class Disassembler
         {
             StringConstant sc => sc.Value,
             NumberConstant nc => nc.Value,
-            BooleanConstant bc => bc.Value, // FIX: BoolConstant -> BooleanConstant
+            BooleanConstant bc => bc.Value,
             NilConstant => null,
             _ => null
         };
@@ -644,7 +646,6 @@ public class Disassembler
         }
     }
 
-    // FIX: Renamed from GetReg to avoid conflict
     private object GetRegister(Dictionary<int, object> regs, int r) => 
         regs.TryGetValue(r, out var v) ? v : $"v{r}";
 
@@ -659,14 +660,12 @@ public class Disassembler
         return val?.ToString() ?? "nil";
     }
 
-    // FIX: Added missing FormatRegister method
     private string FormatRegister(Dictionary<int, object> regs, int reg)
     {
         return FormatValue(GetRegister(regs, reg));
     }
 }
 
-// FIX: Added ReferenceEqualityComparer
 public class ReferenceEqualityComparer : IEqualityComparer<object>
 {
     public static readonly ReferenceEqualityComparer Instance = new();
