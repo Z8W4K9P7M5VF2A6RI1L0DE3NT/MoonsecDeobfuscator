@@ -12,7 +12,6 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
-// Add these using statements
 using System.Collections.Generic;
 using System.Linq;
 using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
@@ -73,10 +72,9 @@ namespace MoonsecBot
         {
             var portStr = Environment.GetEnvironmentVariable("PORT") ?? "3000";
             var builder = WebApplication.CreateBuilder();
-            builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Any, int.Parse(portStr)));
             var app = builder.Build();
             app.MapGet("/", () => "MoonSec Bot is running.");
-            await app.RunAsync();
+            await app.RunAsync($"http://0.0.0.0:{portStr}");
         }
 
         private async Task ReadyAsync()
@@ -166,7 +164,7 @@ namespace MoonsecBot
         }
     }
 
-    // 🚀 ALL THE AI RENAMER CLASSES GO HERE (or in separate files)
+    // 🚀 ALL THE AI RENAMER CLASSES
 
     public class RenamerConfig
     {
