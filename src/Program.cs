@@ -54,7 +54,7 @@ namespace MoonsecBot
                     Model = "moonshotai/Kimi-K2-Instruct-0905",
                     AggressiveMode = true,
                     PreserveGlobals = false,
-                    MaxFileSizeKB = 500 // 🚀 Limit file size to 500KB
+                    MaxFileSizeKB = 500 // 🚀 Limit file size to prevent memory issues
                 }))
                 .BuildServiceProvider();
 
@@ -125,6 +125,13 @@ namespace MoonsecBot
                 var bytes = await http.GetByteArrayAsync(file.Url);
                 var input = Encoding.UTF8.GetString(bytes);
 
+                // 🚀 Check if input is valid
+                if (string.IsNullOrWhiteSpace(input))
+                {
+                    await FollowupAsync(" File is empty or could not be read.");
+                    return;
+                }
+
                 // 🚀 Use AI-powered deobfuscation with error handling
                 string deobfuscatedText = await _service.DeobfuscateWithAIAsync(input);
                 
@@ -185,13 +192,13 @@ namespace MoonsecBot
 
     public class RenamerConfig
     {
-        public string ApiKey { get; set; }
+        public string ApiKey { get; set; } = string.Empty; // 🚀 Initialized to prevent null
         public string ApiEndpoint { get; set; } = "https://api.groq.com/openai/v1/chat/completions";
         public string Model { get; set; } = "moonshotai/Kimi-K2-Instruct-0905";
         public bool AggressiveMode { get; set; } = true;
         public bool PreserveGlobals { get; set; } = false;
         public int ContextWindow { get; set; } = 256000;
-        public int MaxFileSizeKB { get; set; } = 500; // 🚀 File size limit
+        public int MaxFileSizeKB { get; set; } = 500;
     }
 
     public class LuaSyntaxTree
@@ -204,32 +211,32 @@ namespace MoonsecBot
 
     public class LuaFunction
     {
-        public string Name { get; set; }
-        public string OriginalName { get; set; }
+        public string Name { get; set; } = string.Empty; // 🚀 Initialized
+        public string OriginalName { get; set; } = string.Empty; // 🚀 Initialized
         public List<string> Parameters { get; set; } = new();
         public List<LuaVariable> LocalVariables { get; set; } = new();
         public int ScopeStart { get; set; }
         public int ScopeEnd { get; set; }
-        public string Context { get; set; }
+        public string Context { get; set; } = string.Empty; // 🚀 Initialized
         public bool IsLocal { get; set; }
     }
 
     public class LuaVariable
     {
-        public string Name { get; set; }
-        public string OriginalName { get; set; }
-        public string TypeHint { get; set; }
+        public string Name { get; set; } = string.Empty; // 🚀 Initialized
+        public string OriginalName { get; set; } = string.Empty; // 🚀 Initialized
+        public string TypeHint { get; set; } = string.Empty; // 🚀 Initialized
         public int DeclarationLine { get; set; }
-        public string Context { get; set; }
+        public string Context { get; set; } = string.Empty; // 🚀 Initialized
         public bool IsConstant { get; set; }
         public bool IsIterators { get; set; }
     }
 
     public class LuaTable
     {
-        public string Name { get; set; }
-        public string OriginalName { get; set; }
-        public string Context { get; set; }
+        public string Name { get; set; } = string.Empty; // 🚀 Initialized
+        public string OriginalName { get; set; } = string.Empty; // 🚀 Initialized
+        public string Context { get; set; } = string.Empty; // 🚀 Initialized
         public Dictionary<string, LuaVariable> Fields { get; set; } = new();
         public List<string> MethodCalls { get; set; } = new();
     }
@@ -249,10 +256,13 @@ namespace MoonsecBot
 
         public AIPoweredLuaRenamer(RenamerConfig config)
         {
-            _config = config;
+            _config = config ?? throw new ArgumentNullException(nameof(config)); // 🚀 Null check
             _httpClient = new HttpClient();
             _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {config.ApiKey}");
             _httpClient.Timeout = TimeSpan.FromSeconds(60); // 🚀 API timeout
+            
+            if (string.IsNullOrEmpty(config.ApiKey))
+                Console.WriteLine("⚠️ WARNING: GROQ_API_KEY is not set!");
         }
 
         public async Task<string> DeobfuscateAndRenameAsync(string luaCode)
@@ -262,6 +272,10 @@ namespace MoonsecBot
 
             var syntaxTree = ParseSyntaxTree(luaCode);
             IdentifyObfuscatedElements(syntaxTree);
+            
+            if (!syntaxTree.RenameMap.Any())
+                return luaCode; // 🚀 No renames needed
+
             await GenerateSemanticNamesAsync(syntaxTree);
             return ApplyRenames(luaCode, syntaxTree.RenameMap);
         }
@@ -398,6 +412,9 @@ namespace MoonsecBot
 
         private async Task GenerateSemanticNamesAsync(LuaSyntaxTree tree)
         {
+            if (!tree.RenameMap.Any())
+                return;
+
             var batches = CreateBatches(tree);
             var renameTasks = batches.Select(batch => ProcessBatchWithAI(batch)).ToArray();
             
@@ -429,7 +446,7 @@ namespace MoonsecBot
             
             // 🚀 Memory optimization - process in smaller batches
             return allSymbols
-                .GroupBy(kvp => allSymbols.Keys.ToList().IndexOf(kvp.Key) / 15) // Reduced from 20 to 15
+                .GroupBy(kvp => allSymbols.Keys.ToList().IndexOf(kvp.Key) / 10) // Further reduced to 10
                 .Select(g => g.ToDictionary(kvp => kvp.Key, kvp => kvp.Value))
                 .ToList();
         }
@@ -439,37 +456,47 @@ namespace MoonsecBot
             if (batch == null || !batch.Any())
                 return new Dictionary<string, string>();
 
-            var prompt = $@"You are a Lua deobfuscation expert. Analyze these obfuscated identifiers and generate meaningful, descriptive names based on context, usage patterns, and Lua conventions. Return ONLY a JSON object mapping original names to new names. Names must be camelCase, descriptive, and follow Lua naming conventions. No comments, no explanations.
+            try
+            {
+                var prompt = $@"You are a Lua deobfuscation expert. Analyze these obfuscated identifiers and generate meaningful, descriptive names based on context, usage patterns, and Lua conventions. Return ONLY a JSON object mapping original names to new names. Names must be camelCase, descriptive, and follow Lua naming conventions. No comments, no explanations.
 
 {JsonSerializer.Serialize(batch, new JsonSerializerOptions { WriteIndented = true })}";
 
-            var requestBody = new
-            {
-                model = _config.Model,
-                messages = new[] { new { role = "user", content = prompt } },
-                temperature = 0.1,
-                max_tokens = 2000
-            };
+                var requestBody = new
+                {
+                    model = _config.Model,
+                    messages = new[] { new { role = "user", content = prompt } },
+                    temperature = 0.1,
+                    max_tokens = 2000
+                };
 
-            var response = await _httpClient.PostAsync(_config.ApiEndpoint, new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json"));
-            
-            if (!response.IsSuccessStatusCode)
-            {
-                var errorContent = await response.Content.ReadAsStringAsync();
-                throw new HttpRequestException($"AI API error: {response.StatusCode} - {errorContent}");
+                var response = await _httpClient.PostAsync(_config.ApiEndpoint, new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json"));
+                
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"❌ AI API error: {response.StatusCode} - {errorContent}");
+                    return new Dictionary<string, string>(); // 🚀 Return empty on error
+                }
+                
+                var responseContent = await response.Content.ReadAsStringAsync();
+                
+                // 🚀 Null-safe deserialization
+                var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseContent);
+                if (aiResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+                {
+                    Console.WriteLine($"❌ AI response was null or malformed: {responseContent}");
+                    return new Dictionary<string, string>(); // 🚀 Return empty on null
+                }
+                
+                var result = JsonSerializer.Deserialize<Dictionary<string, string>>(aiResponse.Choices[0].Message.Content);
+                return result ?? new Dictionary<string, string>();
             }
-            
-            var responseContent = await response.Content.ReadAsStringAsync();
-            
-            // 🚀 Null-safe deserialization
-            var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseContent);
-            if (aiResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+            catch (Exception ex)
             {
-                throw new InvalidOperationException("AI response was null or malformed");
+                Console.WriteLine($"❌ Error in ProcessBatchWithAI: {ex.Message}");
+                return new Dictionary<string, string>(); // 🚀 Return empty on exception
             }
-            
-            var result = JsonSerializer.Deserialize<Dictionary<string, string>>(aiResponse.Choices[0].Message.Content);
-            return result ?? new Dictionary<string, string>();
         }
 
         private string ApplyRenames(string code, Dictionary<string, string> renameMap)
@@ -477,18 +504,26 @@ namespace MoonsecBot
             if (renameMap == null || !renameMap.Any())
                 return code;
 
-            var sortedKeys = renameMap.Keys.OrderByDescending(k => k.Length).ThenByDescending(k => k);
-            
-            foreach (var original in sortedKeys)
+            try
             {
-                var newName = renameMap[original];
-                if (string.IsNullOrEmpty(newName) || original == newName) continue;
+                var sortedKeys = renameMap.Keys.OrderByDescending(k => k.Length).ThenByDescending(k => k);
                 
-                var pattern = $@"\b{Regex.Escape(original)}\b";
-                code = Regex.Replace(code, pattern, newName);
+                foreach (var original in sortedKeys)
+                {
+                    var newName = renameMap[original];
+                    if (string.IsNullOrEmpty(newName) || original == newName) continue;
+                    
+                    var pattern = $@"\b{Regex.Escape(original)}\b";
+                    code = Regex.Replace(code, pattern, newName);
+                }
+                
+                return code;
             }
-            
-            return code;
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in ApplyRenames: {ex.Message}");
+                return code; // 🚀 Return original code on error
+            }
         }
 
         private string ExtractContext(int lineNum, string[] allLines)
@@ -503,7 +538,7 @@ namespace MoonsecBot
             int depth = 0;
             for (int i = startLine; i < allLines.Length; i++)
             {
-                depth += allLines[i].Count(c => c == '{') - allLines[i].Count(c => c == '}');
+                depth += allLines[i].Count(c => c == '{') - allLines[i].Count(c == '}');
                 if (depth <= 0) return i;
             }
             return allLines.Length - 1;
