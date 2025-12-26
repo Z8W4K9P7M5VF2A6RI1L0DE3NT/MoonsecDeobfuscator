@@ -151,7 +151,7 @@ namespace MoonsecBot
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ Deobfuscation error: {ex.Message}\n{ex.StackTrace}");
-                await FollowupAsync($" Error: `{ex.GetType().Name}`");
+                await FollowupAsync($" Error: `{ex.GetType().Name}: {ex.Message}`");
             }
         }
     }
@@ -249,15 +249,29 @@ namespace MoonsecBot
             _httpClient.Timeout = TimeSpan.FromSeconds(60);
         }
 
+        // 🚀 FIX: Wrap main logic in try-catch
         public async Task<string> DeobfuscateAndRenameAsync(string luaCode)
         {
-            if (string.IsNullOrWhiteSpace(luaCode))
-                throw new ArgumentException("Input code cannot be empty", nameof(luaCode));
+            try
+            {
+                if (string.IsNullOrWhiteSpace(luaCode))
+                    throw new ArgumentException("Input code cannot be empty", nameof(luaCode));
 
-            var syntaxTree = ParseSyntaxTree(luaCode);
-            IdentifyObfuscatedElements(syntaxTree);
-            await GenerateSemanticNamesAsync(syntaxTree);
-            return ApplyRenames(luaCode, syntaxTree.RenameMap);
+                var syntaxTree = ParseSyntaxTree(luaCode);
+                IdentifyObfuscatedElements(syntaxTree);
+                await GenerateSemanticNamesAsync(syntaxTree);
+                return ApplyRenames(luaCode, syntaxTree.RenameMap);
+            }
+            catch (ArgumentOutOfRangeException ex)
+            {
+                Console.WriteLine($"❌ ArgumentOutOfRangeException: {ex.Message}");
+                return luaCode; // Return original code on error
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Unexpected error: {ex.Message}");
+                return luaCode; // Return original code on error
+            }
         }
 
         private LuaSyntaxTree ParseSyntaxTree(string code)
@@ -270,9 +284,16 @@ namespace MoonsecBot
                 var line = lines[i].Trim();
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 
-                ParseFunctionDefinitions(line, i, tree, lines);
-                ParseVariableDeclarations(line, i, tree, lines);
-                ParseTableStructures(line, i, tree, lines);
+                try
+                {
+                    ParseFunctionDefinitions(line, i, tree, lines);
+                    ParseVariableDeclarations(line, i, tree, lines);
+                    ParseTableStructures(line, i, tree, lines);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Warning: Failed to parse line {i}: {ex.Message}");
+                }
             }
             
             return tree;
@@ -280,67 +301,88 @@ namespace MoonsecBot
 
         private void ParseFunctionDefinitions(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
         {
-            var match = _functionRegex.Match(line);
-            if (!match.Success) return;
-            
-            var func = new LuaFunction
+            try
             {
-                OriginalName = match.Groups[1].Value,
-                Context = ExtractContext(lineNum, allLines),
-                IsLocal = line.Trim().StartsWith("local"),
-                ScopeStart = lineNum
-            };
-            
-            var paramsMatch = match.Groups[2].Value.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrWhiteSpace(p));
-            func.Parameters.AddRange(paramsMatch);
-            
-            func.ScopeEnd = FindScopeEnd(lineNum, allLines);
-            tree.Functions.Add(func);
-            tree.RenameMap[func.OriginalName] = func.OriginalName;
+                var match = _functionRegex.Match(line);
+                if (!match.Success) return;
+                
+                var func = new LuaFunction
+                {
+                    OriginalName = match.Groups[1].Value,
+                    Context = ExtractContext(lineNum, allLines),
+                    IsLocal = line.Trim().StartsWith("local"),
+                    ScopeStart = lineNum
+                };
+                
+                var paramsMatch = match.Groups[2].Value.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrWhiteSpace(p));
+                func.Parameters.AddRange(paramsMatch);
+                
+                func.ScopeEnd = FindScopeEnd(lineNum, allLines);
+                tree.Functions.Add(func);
+                tree.RenameMap[func.OriginalName] = func.OriginalName;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Warning: Failed to parse function on line {lineNum}: {ex.Message}");
+            }
         }
 
         private void ParseVariableDeclarations(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
         {
-            var match = _variableRegex.Match(line);
-            if (!match.Success) return;
-            
-            var var = new LuaVariable
+            try
             {
-                OriginalName = match.Groups[1].Value,
-                Context = ExtractContext(lineNum, allLines),
-                DeclarationLine = lineNum
-            };
-            
-            var.IsIterators = match.Groups[2].Value.Contains("pairs") || match.Groups[2].Value.Contains("ipairs");
-            var.IsConstant = DetectConstantPattern(match.Groups[2].Value);
-            
-            tree.Variables.Add(var);
-            tree.RenameMap[var.OriginalName] = var.OriginalName;
+                var match = _variableRegex.Match(line);
+                if (!match.Success) return;
+                
+                var var = new LuaVariable
+                {
+                    OriginalName = match.Groups[1].Value,
+                    Context = ExtractContext(lineNum, allLines),
+                    DeclarationLine = lineNum
+                };
+                
+                var.IsIterators = match.Groups[2].Value.Contains("pairs") || match.Groups[2].Value.Contains("ipairs");
+                var.IsConstant = DetectConstantPattern(match.Groups[2].Value);
+                
+                tree.Variables.Add(var);
+                tree.RenameMap[var.OriginalName] = var.OriginalName;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Warning: Failed to parse variable on line {lineNum}: {ex.Message}");
+            }
         }
 
         private void ParseTableStructures(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
         {
-            var match = _tableRegex.Match(line);
-            if (!match.Success) return;
-            
-            var table = new LuaTable
+            try
             {
-                OriginalName = match.Groups[1].Value,
-                Context = ExtractContext(lineNum, allLines)
-            };
-            
-            var fieldMatches = Regex.Matches(match.Groups[2].Value, @"([a-zA-Z_]\w*)\s*=\s*([^,}]+)");
-            foreach (Match field in fieldMatches)
-            {
-                table.Fields[field.Groups[1].Value] = new LuaVariable
+                var match = _tableRegex.Match(line);
+                if (!match.Success) return;
+                
+                var table = new LuaTable
                 {
-                    OriginalName = field.Groups[1].Value,
-                    Context = field.Groups[2].Value
+                    OriginalName = match.Groups[1].Value,
+                    Context = ExtractContext(lineNum, allLines)
                 };
+                
+                var fieldMatches = Regex.Matches(match.Groups[2].Value, @"([a-zA-Z_]\w*)\s*=\s*([^,}]+)");
+                foreach (Match field in fieldMatches)
+                {
+                    table.Fields[field.Groups[1].Value] = new LuaVariable
+                    {
+                        OriginalName = field.Groups[1].Value,
+                        Context = field.Groups[2].Value
+                    };
+                }
+                
+                tree.Tables.Add(table);
+                tree.RenameMap[table.OriginalName] = table.OriginalName;
             }
-            
-            tree.Tables.Add(table);
-            tree.RenameMap[table.OriginalName] = table.OriginalName;
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Warning: Failed to parse table on line {lineNum}: {ex.Message}");
+            }
         }
 
         private void IdentifyObfuscatedElements(LuaSyntaxTree tree)
@@ -363,6 +405,9 @@ namespace MoonsecBot
 
         private async Task GenerateSemanticNamesAsync(LuaSyntaxTree tree)
         {
+            if (!tree.RenameMap.Any())
+                return;
+
             var batches = CreateBatches(tree);
             var renameTasks = batches.Select(batch => ProcessBatchWithAI(batch)).ToArray();
             
@@ -400,52 +445,100 @@ namespace MoonsecBot
 
         private async Task<Dictionary<string, string>> ProcessBatchWithAI(Dictionary<string, string> batch)
         {
-            var prompt = $@"You are a Lua deobfuscation expert. Analyze these obfuscated identifiers and generate meaningful, descriptive names based on context, usage patterns, and Lua conventions. Return ONLY a JSON object mapping original names to new names. Names must be camelCase, descriptive, and follow Lua naming conventions. No comments, no explanations.
+            if (batch == null || !batch.Any())
+                return new Dictionary<string, string>();
+
+            try
+            {
+                var prompt = $@"You are a Lua deobfuscation expert. Analyze these obfuscated identifiers and generate meaningful, descriptive names based on context, usage patterns, and Lua conventions. Return ONLY a JSON object mapping original names to new names. Names must be camelCase, descriptive, and follow Lua naming conventions. No comments, no explanations.
 
 {JsonSerializer.Serialize(batch, new JsonSerializerOptions { WriteIndented = true })}";
 
-            var requestBody = new
-            {
-                model = _config.Model,
-                messages = new[] { new { role = "user", content = prompt } },
-                temperature = 0.1,
-                max_tokens = 2000
-            };
+                var requestBody = new
+                {
+                    model = _config.Model,
+                    messages = new[] { new { role = "user", content = prompt } },
+                    temperature = 0.1,
+                    max_tokens = 2000
+                };
 
-            var response = await _httpClient.PostAsync(_config.ApiEndpoint, new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json"));
-            var responseContent = await response.Content.ReadAsStringAsync();
-            
-            var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseContent);
-            return JsonSerializer.Deserialize<Dictionary<string, string>>(aiResponse.Choices[0].Message.Content);
+                var response = await _httpClient.PostAsync(_config.ApiEndpoint, new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json"));
+                
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"❌ AI API error: {response.StatusCode} - {errorContent}");
+                    return new Dictionary<string, string>();
+                }
+                
+                var responseContent = await response.Content.ReadAsStringAsync();
+                
+                var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseContent);
+                if (aiResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+                {
+                    Console.WriteLine($"❌ AI response was null or malformed: {responseContent}");
+                    return new Dictionary<string, string>();
+                }
+                
+                var result = JsonSerializer.Deserialize<Dictionary<string, string>>(aiResponse.Choices[0].Message.Content);
+                return result ?? new Dictionary<string, string>();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in ProcessBatchWithAI: {ex.Message}");
+                return new Dictionary<string, string>();
+            }
         }
 
+        // 🚀 FIX: Bounds checking to prevent ArgumentOutOfRangeException
         private string ApplyRenames(string code, Dictionary<string, string> renameMap)
         {
-            var sortedKeys = renameMap.Keys.OrderByDescending(k => k.Length).ThenByDescending(k => k);
-            
-            foreach (var original in sortedKeys)
+            if (renameMap == null || !renameMap.Any())
+                return code;
+
+            try
             {
-                var newName = renameMap[original];
-                if (original == newName) continue;
+                var sortedKeys = renameMap.Keys.OrderByDescending(k => k.Length).ThenByDescending(k => k);
                 
-                var pattern = $@"\b{Regex.Escape(original)}\b";
-                code = Regex.Replace(code, pattern, newName);
+                foreach (var original in sortedKeys)
+                {
+                    var newName = renameMap[original];
+                    if (string.IsNullOrEmpty(newName) || original == newName) continue;
+                    
+                    var pattern = $@"\b{Regex.Escape(original)}\b";
+                    code = Regex.Replace(code, pattern, newName);
+                }
+                
+                return code;
             }
-            
-            return code;
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in ApplyRenames: {ex.Message}");
+                return code;
+            }
         }
 
+        // 🚀 FIX: Bounds checking to prevent ArgumentOutOfRangeException
         private string ExtractContext(int lineNum, string[] allLines)
         {
+            if (allLines == null || allLines.Length == 0) return "";
+            
             var start = Math.Max(0, lineNum - 3);
             var end = Math.Min(allLines.Length - 1, lineNum + 3);
+            
+            if (start > end) return "";
+            
             return string.Join(" ", allLines.Skip(start).Take(end - start + 1));
         }
 
+        // 🚀 FIX: Bounds checking to prevent ArgumentOutOfRangeException
         private int FindScopeEnd(int startLine, string[] allLines)
         {
+            if (startLine >= allLines.Length) return allLines.Length - 1;
+            if (startLine < 0) return 0;
+            
             int depth = 0;
-            for (int i = startLine; i < allLines.Length; i++)
+            for (int i = startLine; i < allLines.Length && i >= 0; i++)
             {
                 depth += allLines[i].Count(c => c == '{') - allLines[i].Count(c => c == '}');
                 if (depth <= 0) return i;
