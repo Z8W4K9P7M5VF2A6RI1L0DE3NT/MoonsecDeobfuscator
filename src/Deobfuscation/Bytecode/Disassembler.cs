@@ -152,10 +152,18 @@ public class Disassembler(Function rootFunction)
         string indent = new string('\t', _indent);
         switch (node)
         {
-            case AssignNode a: _builder.AppendLine($"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}"); break;
-            case CallNode c: _builder.AppendLine($"{indent}{c.Func}({string.Join(", ", c.Args)})"); break;
-            case ReturnNode r: _builder.AppendLine($"{indent}return {string.Join(", ", r.Values)}"); break;
-            case FunctionNode f: PrintFunctionNode(f); break;
+            case AssignNode a: 
+                _builder.AppendLine($"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}"); 
+                break;
+            case CallNode c: 
+                _builder.AppendLine($"{indent}{c.Func}({string.Join(", ", c.Args)})"); 
+                break;
+            case ReturnNode r: 
+                _builder.AppendLine($"{indent}return {string.Join(", ", r.Values)}"); 
+                break;
+            case FunctionNode f: 
+                PrintFunctionNode(f); 
+                break;
         }
     }
 
@@ -216,6 +224,7 @@ public class LuaTable
 {
     public string Name { get; set; }
     public string OriginalName { get; set; }
+    public string Context { get; set; } // FIX: Added missing property
     public Dictionary<string, LuaVariable> Fields { get; set; } = new();
     public List<string> MethodCalls { get; set; } = new();
 }
@@ -432,7 +441,7 @@ public class AIPoweredLuaRenamer
         int depth = 0;
         for (int i = startLine; i < allLines.Length; i++)
         {
-            depth += allLines[i].Count(c => c == '{') - allLines[i].Count(c == '}');
+            depth += allLines[i].Count(c => c == '{') - allLines[i].Count(c => c == '}');
             if (depth <= 0) return i;
         }
         return allLines.Length - 1;
@@ -457,46 +466,4 @@ public class AIChoice
 public class AIMessage
 {
     public string Content { get; set; }
-}
-
-public class Program
-{
-    static async Task Main(string[] args)
-    {
-        // 🚀 CONFIGURE YOUR MODEL HERE
-        var config = new RenamerConfig { 
-            ApiKey = Environment.GetEnvironmentVariable("GROQ_API_KEY") ?? "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",
-            ApiEndpoint = "https://api.groq.com/openai/v1/chat/completions",
-            Model = "moonshotai/Kimi-K2-Instruct-0905", // Best for coding: 256K context, 200+ T/s
-            // Alternative: DeepSeek V3.2 (requires DeepSeek API key)
-            // ApiKey = Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY"),
-            // ApiEndpoint = "https://api.deepseek.com/v1/chat/completions",
-            // Model = "deepseek-chat"
-        };
-        
-        var renamer = new AIPoweredLuaRenamer(config);
-        
-        if (args.Length > 0)
-        {
-            var disassembler = new Disassembler(LoadFunctionFromFile(args[0]));
-            string rawLua = disassembler.Disassemble();
-            string deobfuscatedLua = await renamer.DeobfuscateAndRenameAsync(rawLua);
-            await File.WriteAllTextAsync("deobfuscated_output.lua", deobfuscatedLua);
-            Console.WriteLine($"✅ Deobfuscated Lua saved to deobfuscated_output.lua");
-        }
-        
-        if (args.Length > 1)
-        {
-            string luaCode = await File.ReadAllTextAsync(args[1]);
-            string renamedLua = await renamer.DeobfuscateAndRenameAsync(luaCode);
-            await File.WriteAllTextAsync("renamed_output.lua", renamedLua);
-            Console.WriteLine($"✅ Renamed Lua saved to renamed_output.lua");
-        }
-    }
-
-    static Function LoadFunctionFromFile(string path)
-    {
-        // Implementation to load Moonsec bytecode file into Function object
-        throw new NotImplementedException("Bytecode loading not implemented. Use your Moonsec loader here.");
-    }
 }
