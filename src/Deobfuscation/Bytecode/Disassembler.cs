@@ -224,7 +224,7 @@ public class LuaTable
 {
     public string Name { get; set; }
     public string OriginalName { get; set; }
-    public string Context { get; set; } // FIX: Added missing property
+    public string Context { get; set; }
     public Dictionary<string, LuaVariable> Fields { get; set; } = new();
     public List<string> MethodCalls { get; set; } = new();
 }
@@ -236,7 +236,10 @@ public class AIPoweredLuaRenamer
     private readonly Regex _functionRegex = new(@"(?:local\s+)?function\s+([a-zA-Z_]\w*)\s*\(?([^)]*)\)?", RegexOptions.Multiline);
     private readonly Regex _variableRegex = new(@"(?:local\s+)?([a-zA-Z_]\w*)\s*=([^;]+)", RegexOptions.Multiline);
     private readonly Regex _tableRegex = new(@"([a-zA-Z_]\w*)\s*=\s*{([^}]+)}", RegexOptions.Multiline);
-    private readonly Regex _obfuscatedNameRegex = new(@"^[a-zA-Z_]{1,3}\d{2,5}$|^[a-zA-Z_]\d{3,}$|^[a-z]{8,}?\d+$");
+    
+    // 🚀 AGGRESSIVE REGEX - matches disassembler names (v1, v_u_3, upvalue_0)
+    private readonly Regex _obfuscatedNameRegex = new(@"^(?:v\d+|v_u_\d+|upvalue_\d+|[a-zA-Z_]{1,3}\d{2,5}|[a-zA-Z_]\d{3,})$", RegexOptions.Multiline);
+    
     private readonly HashSet<string> _luaGlobals = new() { "print", "pairs", "ipairs", "next", "type", "tonumber", "tostring", "table", "string", "math", "os", "debug", "require", "pcall", "xpcall", "error", "assert", "select", "unpack", "load", "loadfile", "dofile", "setmetatable", "getmetatable", "rawset", "rawget", "rawequal", "collectgarbage" };
 
     public AIPoweredLuaRenamer(RenamerConfig config)
@@ -296,7 +299,7 @@ public class AIPoweredLuaRenamer
     private void ParseVariableDeclarations(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
     {
         var match = _variableRegex.Match(line);
-        if (!match.Success || _luaGlobals.Contains(match.Groups[1].Value)) return;
+        if (!match.Success) return; // 🚀 REMOVED GLOBAL CHECK FOR AGGRESSIVE MODE
         
         var var = new LuaVariable
         {
@@ -339,12 +342,13 @@ public class AIPoweredLuaRenamer
 
     private void IdentifyObfuscatedElements(LuaSyntaxTree tree)
     {
+        // 🚀 AGGRESSIVE MODE - rename everything that matches pattern
         foreach (var func in tree.Functions.Where(f => _obfuscatedNameRegex.IsMatch(f.OriginalName)))
         {
             func.Name = func.OriginalName;
         }
         
-        foreach (var var in tree.Variables.Where(v => _obfuscatedNameRegex.IsMatch(v.OriginalName) && !_luaGlobals.Contains(v.OriginalName)))
+        foreach (var var in tree.Variables.Where(v => _obfuscatedNameRegex.IsMatch(v.OriginalName)))
         {
             var.Name = var.OriginalName;
         }
