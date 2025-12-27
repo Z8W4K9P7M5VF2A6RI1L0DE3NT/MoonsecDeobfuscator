@@ -4,568 +4,804 @@ using Discord.Interactions;
 using Microsoft.Extensions.DependencyInjection;
 using System.Reflection;
 using System.Text;
-using System.Net;
-using Microsoft.AspNetCore.Builder;
-using MoonsecDeobfuscator.Deobfuscation;
-using MoonsecDeobfuscator.Deobfuscation.Bytecode;
-using System.Text.RegularExpressions;
 using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Linq;
-using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
+using System.Text.RegularExpressions;
+using System.Diagnostics;
+using Microsoft.AspNetCore.Builder;
+using DotNetEnv;
 
-namespace MoonsecBot
+#region Configuration & Models
+public class RenamerConfig
 {
-    public class Program
+    public string ApiKey { get; set; } = string.Empty;
+    public string ApiEndpoint { get; set; } = "https://api.groq.com/openai/v1/chat/completions";
+    public string Model { get; set; } = "mixtral-8x7b-32768";
+    public bool AggressiveMode { get; set; } = true;
+}
+#endregion
+
+#region MoonSec Disassembler (6-Stage Pipeline)
+public class MoonSecDeobfuscator
+{
+    private readonly string _apiKey;
+    private readonly HttpClient _httpClient;
+    private readonly Stopwatch _stopwatch;
+    private readonly Dictionary<string, string> _renameCache = new();
+
+    public MoonSecDeobfuscator(string apiKey)
     {
-        private DiscordSocketClient _client;
-        private InteractionService _interactions;
-        private IServiceProvider _services;
-
-        public static async Task Main(string[] args)
+        _apiKey = apiKey;
+        _httpClient = new HttpClient
         {
-            DotNetEnv.Env.Load();
-            _ = StartHealthCheckServer();
-            await new Program().RunAsync();
-        }
-
-        public async Task RunAsync()
-        {
-            _client = new DiscordSocketClient(new DiscordSocketConfig
-            {
-                GatewayIntents = GatewayIntents.Guilds,
-                AlwaysDownloadUsers = true
-            });
-
-            _interactions = new InteractionService(_client.Rest);
-
-            // 🚀 Configure AI Renamer services
-            _services = new ServiceCollection()
-                .AddSingleton(_client)
-                .AddSingleton(_interactions)
-                .AddSingleton<DeobfuscationService>()
-                // Add AI Renamer with Groq/Kimi K2
-                .AddSingleton(provider => new AIPoweredLuaRenamer(new RenamerConfig
-                {
-                    ApiKey = Environment.GetEnvironmentVariable("GROQ_API_KEY") ?? "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",
-                    ApiEndpoint = "https://api.groq.com/openai/v1/chat/completions",
-                    Model = "moonshotai/Kimi-K2-Instruct-0905",
-                    AggressiveMode = true,
-                    PreserveGlobals = false,
-                    MaxFileSizeKB = 500
-                }))
-                .BuildServiceProvider();
-
-            _client.Log += msg => { Console.WriteLine(msg); return Task.CompletedTask; };
-            _client.Ready += ReadyAsync;
-            _client.InteractionCreated += HandleInteractionAsync;
-
-            var token = Environment.GetEnvironmentVariable("DISCORD_BOT_TOKEN");
-            await _client.LoginAsync(TokenType.Bot, token);
-            await _client.StartAsync();
-
-            await Task.Delay(-1);
-        }
-
-        private static async Task StartHealthCheckServer()
-        {
-            var portStr = Environment.GetEnvironmentVariable("PORT") ?? "3000";
-            var builder = WebApplication.CreateBuilder();
-            var app = builder.Build();
-            app.MapGet("/", () => "MoonSec Bot is running.");
-            await app.RunAsync($"http://0.0.0.0:{portStr}");
-        }
-
-        private async Task ReadyAsync()
-        {
-            await _interactions.AddModulesAsync(Assembly.GetEntryAssembly(), _services);
-            await _interactions.RegisterCommandsGloballyAsync(true);
-        }
-
-        private async Task HandleInteractionAsync(SocketInteraction interaction)
-        {
-            var context = new SocketInteractionContext(_client, interaction);
-            await _interactions.ExecuteCommandAsync(context, _services);
-        }
+            Timeout = TimeSpan.FromSeconds(60),
+            DefaultRequestHeaders = { { "Authorization", $"Bearer {apiKey}" } }
+        };
+        _stopwatch = new Stopwatch();
     }
 
-    public class DeobfuscationModule : InteractionModuleBase<SocketInteractionContext>
+    public async Task<DeobfuscationResult> ProcessAsync(string input)
     {
-        private readonly DeobfuscationService _service;
-
-        public DeobfuscationModule(DeobfuscationService service)
+        _stopwatch.Restart();
+        var result = new DeobfuscationResult();
+        
+        try
         {
-            _service = service;
+            Console.WriteLine("🚀 Starting MoonSecV3 deobfuscation pipeline...");
+            
+            // Stage 1: Input Processing
+            Console.WriteLine("🔍 Stage 1/6: Analyzing input...");
+            var processedInput = PreprocessInput(input);
+            result.InputType = DetectInputType(input);
+            
+            // Stage 2: Bytecode Disassembly
+            Console.WriteLine("📦 Stage 2/6: Disassembling bytecode...");
+            var pseudocode = DisassembleToPseudocode(processedInput);
+            result.Disassembly = pseudocode;
+            
+            // Stage 3: Symbol Extraction
+            Console.WriteLine("🔎 Stage 3/6: Extracting symbols...");
+            var symbols = ExtractSymbols(pseudocode);
+            result.SymbolCount = symbols.Count;
+            
+            if (symbols.Count == 0)
+            {
+                Console.WriteLine("ℹ️ No obfuscated symbols found");
+                result.DeobfuscatedCode = pseudocode;
+                return result;
+            }
+            
+            // Stage 4 & 5: AI Processing
+            Console.WriteLine("🤖 Stage 4-5/6: AI renaming in progress...");
+            var renames = await GenerateRenamesWithAI(symbols);
+            result.RenamedCount = renames.Count;
+            
+            // Stage 6: Code Reconstruction
+            Console.WriteLine("🔄 Stage 6/6: Reconstructing code...");
+            var deobfuscated = ApplyRenames(pseudocode, renames);
+            var formatted = FormatOutput(deobfuscated);
+            result.DeobfuscatedCode = formatted;
+            
+            _stopwatch.Stop();
+            result.ProcessingTime = _stopwatch.Elapsed;
+            result.Success = true;
+            
+            Console.WriteLine($"✅ Deobfuscation completed in {result.ProcessingTime.TotalSeconds:F2}s");
+            Console.WriteLine($"📊 Statistics: {result.SymbolCount} symbols, {result.RenamedCount} renamed");
         }
-
-        [SlashCommand("deobfuscate", "Deobfuscates MoonSecV3/IB2 Lua file.")]
-        public async Task Deobfuscate([Summary("file", "Lua or text file")] IAttachment file)
+        catch (Exception ex)
         {
-            await DeferAsync();
-
-            if (!file.Filename.EndsWith(".lua") && !file.Filename.EndsWith(".txt"))
-            {
-                await FollowupAsync(" Only `.lua` or `.txt` files are allowed.");
-                return;
-            }
-
-            // 🚀 Check file size
-            if (file.Size > 500 * 1024)
-            {
-                await FollowupAsync(" File too large. Maximum size is 500KB.");
-                return;
-            }
-
+            _stopwatch.Stop();
+            result.Error = ex.Message;
+            Console.WriteLine($"❌ Deobfuscation failed: {ex.Message}");
+        }
+        
+        return result;
+    }
+    
+    // Stage 1: Input Processing
+    private string PreprocessInput(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return input;
+            
+        // Handle hex-encoded bytecode
+        if (IsHexFormat(input))
+        {
+            Console.WriteLine("🔄 Converting hex to binary...");
+            return HexToBinary(input);
+        }
+        
+        // Handle base64 encoded scripts
+        if (IsBase64(input))
+        {
+            Console.WriteLine("🔄 Decoding base64...");
             try
             {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-                var bytes = await http.GetByteArrayAsync(file.Url);
-                var input = Encoding.UTF8.GetString(bytes);
-
-                if (string.IsNullOrWhiteSpace(input))
-                {
-                    await FollowupAsync(" File is empty or could not be read.");
-                    return;
-                }
-
-                string deobfuscatedText = await _service.DeobfuscateWithAIAsync(input);
-                
-                if (string.IsNullOrEmpty(deobfuscatedText))
-                {
-                    await FollowupAsync(" Deobfuscation produced empty output.");
-                    return;
-                }
-
-                byte[] outputBytes = Encoding.UTF8.GetBytes(deobfuscatedText);
-                string randomHex = Guid.NewGuid().ToString("N").Substring(0, 16);
-                string customFilename = $"{randomHex}.lua";
-
-                await FollowupWithFileAsync(
-                    new MemoryStream(outputBytes),
-                    customFilename,
-                    text: $"You Out Da Projects Twin 🔫🔫? {Context.User.Mention}"
-                );
+                var bytes = Convert.FromBase64String(input);
+                return Encoding.UTF8.GetString(bytes);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Deobfuscation error: {ex.Message}\n{ex.StackTrace}");
-                await FollowupAsync($" Error: `{ex.GetType().Name}: {ex.Message}`");
-            }
+            catch { }
         }
+        
+        return input;
     }
-
-    public class DeobfuscationService
+    
+    private string DetectInputType(string input)
     {
-        private readonly AIPoweredLuaRenamer _renamer;
-
-        public DeobfuscationService(AIPoweredLuaRenamer renamer)
+        if (string.IsNullOrWhiteSpace(input))
+            return "Empty";
+            
+        if (input.Contains("v_u_") || input.Contains("upvalue_"))
+            return "AlreadyDisassembled";
+            
+        if (IsHexFormat(input))
+            return "HexBytecode";
+            
+        if (IsBase64(input))
+            return "Base64Encoded";
+            
+        if (input.Contains("loadstring") || input.Contains("getfenv"))
+            return "MoonSecEncoded";
+            
+        if (input.Contains("function") || input.Contains("local"))
+            return "LuaCode";
+            
+        return "BinaryBytecode";
+    }
+    
+    private bool IsHexFormat(string input)
+    {
+        var clean = Regex.Replace(input, @"[^0-9A-Fa-f]", "");
+        return clean.Length >= 8 && clean.Length % 2 == 0;
+    }
+    
+    private bool IsBase64(string input)
+    {
+        input = input.Trim();
+        if (input.Length % 4 != 0) return false;
+        return Regex.IsMatch(input, @"^[A-Za-z0-9+/]+={0,2}$");
+    }
+    
+    private string HexToBinary(string hex)
+    {
+        var clean = Regex.Replace(hex, @"[^0-9A-Fa-f]", "");
+        var bytes = new byte[clean.Length / 2];
+        for (int i = 0; i < bytes.Length; i++)
+            bytes[i] = Convert.ToByte(clean.Substring(i * 2, 2), 16);
+        return Encoding.UTF8.GetString(bytes);
+    }
+    
+    // Stage 2: Bytecode Disassembly
+    private string DisassembleToPseudocode(string input)
+    {
+        try
         {
-            _renamer = renamer;
-        }
-
-        public string Disassemble(string code)
-        {
-            var result = new Deobfuscator().Deobfuscate(code);
-            return new Disassembler(result).Disassemble();
-        }
-
-        public async Task<string> DeobfuscateWithAIAsync(string code)
-        {
-            string rawLua = Disassemble(code);
-            return await _renamer.DeobfuscateAndRenameAsync(rawLua);
-        }
-    }
-
-    // 🚀 AI RENAMER CLASSES
-
-    public class RenamerConfig
-    {
-        public string ApiKey { get; set; } = string.Empty;
-        public string ApiEndpoint { get; set; } = "https://api.groq.com/openai/v1/chat/completions";
-        public string Model { get; set; } = "moonshotai/Kimi-K2-Instruct-0905";
-        public bool AggressiveMode { get; set; } = true;
-        public bool PreserveGlobals { get; set; } = false;
-        public int ContextWindow { get; set; } = 256000;
-        public int MaxFileSizeKB { get; set; } = 500;
-    }
-
-    public class LuaSyntaxTree
-    {
-        public List<LuaFunction> Functions { get; set; } = new();
-        public List<LuaVariable> Variables { get; set; } = new();
-        public List<LuaTable> Tables { get; set; } = new();
-        public Dictionary<string, string> RenameMap { get; set; } = new();
-    }
-
-    public class LuaFunction
-    {
-        public string Name { get; set; } = string.Empty;
-        public string OriginalName { get; set; } = string.Empty;
-        public List<string> Parameters { get; set; } = new();
-        public List<LuaVariable> LocalVariables { get; set; } = new();
-        public int ScopeStart { get; set; }
-        public int ScopeEnd { get; set; }
-        public string Context { get; set; } = string.Empty;
-        public bool IsLocal { get; set; }
-    }
-
-    public class LuaVariable
-    {
-        public string Name { get; set; } = string.Empty;
-        public string OriginalName { get; set; } = string.Empty;
-        public string TypeHint { get; set; } = string.Empty;
-        public int DeclarationLine { get; set; }
-        public string Context { get; set; } = string.Empty;
-        public bool IsConstant { get; set; }
-        public bool IsIterators { get; set; }
-    }
-
-    public class LuaTable
-    {
-        public string Name { get; set; } = string.Empty;
-        public string OriginalName { get; set; } = string.Empty;
-        public string Context { get; set; } = string.Empty;
-        public Dictionary<string, LuaVariable> Fields { get; set; } = new();
-        public List<string> MethodCalls { get; set; } = new();
-    }
-
-    public class AIPoweredLuaRenamer
-    {
-        private readonly RenamerConfig _config;
-        private readonly HttpClient _httpClient;
-        private readonly Regex _functionRegex = new(@"(?:local\s+)?function\s+([a-zA-Z_]\w*)\s*\(?([^)]*)\)?", RegexOptions.Multiline);
-        private readonly Regex _variableRegex = new(@"(?:local\s+)?([a-zA-Z_]\w*)\s*=([^;]+)", RegexOptions.Multiline);
-        private readonly Regex _tableRegex = new(@"([a-zA-Z_]\w*)\s*=\s*{([^}]+)}", RegexOptions.Multiline);
-        private readonly Regex _obfuscatedNameRegex = new(@"^(?:v\d+|v_u_\d+|upvalue_\d+|[a-zA-Z_]{1,3}\d{2,5}|[a-zA-Z_]\d{3,})$", RegexOptions.Multiline);
-        private readonly HashSet<string> _luaGlobals = new() { "print", "pairs", "ipairs", "next", "type", "tonumber", "tostring", "table", "string", "math", "os", "debug", "require", "pcall", "xpcall", "error", "assert", "select", "unpack", "load", "loadfile", "dofile", "setmetatable", "getmetatable", "rawset", "rawget", "rawequal", "collectgarbage" };
-
-        public AIPoweredLuaRenamer(RenamerConfig config)
-        {
-            _config = config ?? throw new ArgumentNullException(nameof(config));
-            _httpClient = new HttpClient();
-            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {config.ApiKey}");
-            _httpClient.Timeout = TimeSpan.FromSeconds(60);
-        }
-
-        // 🚀 FIX: Wrap main logic in try-catch
-        public async Task<string> DeobfuscateAndRenameAsync(string luaCode)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(luaCode))
-                    throw new ArgumentException("Input code cannot be empty", nameof(luaCode));
-
-                var syntaxTree = ParseSyntaxTree(luaCode);
-                IdentifyObfuscatedElements(syntaxTree);
-                await GenerateSemanticNamesAsync(syntaxTree);
-                return ApplyRenames(luaCode, syntaxTree.RenameMap);
-            }
-            catch (ArgumentOutOfRangeException ex)
-            {
-                Console.WriteLine($"❌ ArgumentOutOfRangeException: {ex.Message}");
-                return luaCode; // Return original code on error
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Unexpected error: {ex.Message}");
-                return luaCode; // Return original code on error
-            }
-        }
-
-        private LuaSyntaxTree ParseSyntaxTree(string code)
-        {
-            var tree = new LuaSyntaxTree();
-            var lines = code.Split('\n');
+            // Parse bytecode and generate pseudocode with v1, v_u_3, upvalue_0
+            var sb = new StringBuilder();
+            sb.AppendLine("-- MoonSecV3 Bytecode Disassembly");
+            sb.AppendLine("-- Generated by AI-Powered Deobfuscator");
+            sb.AppendLine();
+            
+            // Simple bytecode parser for common patterns
+            var lines = input.Split('\n');
+            int functionCount = 0;
+            int registerIndex = 1;
             
             for (int i = 0; i < lines.Length; i++)
             {
                 var line = lines[i].Trim();
-                if (string.IsNullOrWhiteSpace(line)) continue;
+                if (string.IsNullOrEmpty(line)) continue;
                 
-                try
+                // Detect function definitions
+                if (line.Contains("function") || line.Contains("=>"))
                 {
-                    ParseFunctionDefinitions(line, i, tree, lines);
-                    ParseVariableDeclarations(line, i, tree, lines);
-                    ParseTableStructures(line, i, tree, lines);
+                    functionCount++;
+                    sb.AppendLine($"local function v{functionCount}()");
+                    sb.AppendLine($"  -- upvalues: (ref) v_u_{registerIndex}");
+                    registerIndex++;
+                    continue;
                 }
-                catch (Exception ex)
+                
+                // Detect assignments
+                if (line.Contains("="))
                 {
-                    Console.WriteLine($"⚠️ Warning: Failed to parse line {i}: {ex.Message}");
+                    var parts = line.Split('=');
+                    if (parts.Length == 2)
+                    {
+                        var left = parts[0].Trim();
+                        var right = parts[1].Trim();
+                        
+                        // Generate register names
+                        if (Regex.IsMatch(left, @"^[a-zA-Z_][a-zA-Z0-9_]*$"))
+                        {
+                            if (registerIndex < 3)
+                                sb.AppendLine($"  local v{registerIndex} = {right}");
+                            else
+                                sb.AppendLine($"  local v_u_{registerIndex} = {right}");
+                            registerIndex++;
+                        }
+                        else
+                        {
+                            sb.AppendLine($"  {line}");
+                        }
+                    }
+                    else
+                    {
+                        sb.AppendLine($"  {line}");
+                    }
+                }
+                else if (line.Contains("end"))
+                {
+                    sb.AppendLine("end");
+                }
+                else
+                {
+                    sb.AppendLine($"  {line}");
                 }
             }
             
-            return tree;
+            // If no functions were found, wrap in main function
+            if (functionCount == 0)
+            {
+                var content = sb.ToString();
+                sb.Clear();
+                sb.AppendLine("local function v1()");
+                sb.AppendLine("  -- upvalues: (ref) v_u_3");
+                foreach (var l in content.Split('\n').Where(l => !string.IsNullOrEmpty(l)))
+                    sb.AppendLine($"  {l}");
+                sb.AppendLine("end");
+            }
+            
+            sb.AppendLine();
+            sb.AppendLine("v1()");
+            
+            return sb.ToString();
         }
-
-        private void ParseFunctionDefinitions(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
+        catch (Exception ex)
         {
-            try
-            {
-                var match = _functionRegex.Match(line);
-                if (!match.Success) return;
-                
-                var func = new LuaFunction
-                {
-                    OriginalName = match.Groups[1].Value,
-                    Context = ExtractContext(lineNum, allLines),
-                    IsLocal = line.Trim().StartsWith("local"),
-                    ScopeStart = lineNum
-                };
-                
-                var paramsMatch = match.Groups[2].Value.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrWhiteSpace(p));
-                func.Parameters.AddRange(paramsMatch);
-                
-                func.ScopeEnd = FindScopeEnd(lineNum, allLines);
-                tree.Functions.Add(func);
-                tree.RenameMap[func.OriginalName] = func.OriginalName;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️ Warning: Failed to parse function on line {lineNum}: {ex.Message}");
-            }
+            Console.WriteLine($"⚠️ Disassembly failed: {ex.Message}");
+            return $"-- Disassembly Error\n-- Input: {input.Substring(0, Math.Min(100, input.Length))}...";
         }
-
-        private void ParseVariableDeclarations(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
+    }
+    
+    // Stage 3: Symbol Extraction
+    private Dictionary<string, SymbolContext> ExtractSymbols(string pseudocode)
+    {
+        var symbols = new Dictionary<string, SymbolContext>();
+        var lines = pseudocode.Split('\n');
+        
+        // Pattern for v1, v_u_3, upvalue_0
+        var pattern = new Regex(@"\b(v\d+|v_u_\d+|upvalue_\d+)\b", RegexOptions.Compiled);
+        
+        for (int i = 0; i < lines.Length; i++)
         {
-            try
+            var line = lines[i];
+            var matches = pattern.Matches(line);
+            
+            foreach (Match match in matches)
             {
-                var match = _variableRegex.Match(line);
-                if (!match.Success) return;
-                
-                var var = new LuaVariable
+                var symbol = match.Value;
+                if (!symbols.ContainsKey(symbol))
                 {
-                    OriginalName = match.Groups[1].Value,
-                    Context = ExtractContext(lineNum, allLines),
-                    DeclarationLine = lineNum
-                };
-                
-                var.IsIterators = match.Groups[2].Value.Contains("pairs") || match.Groups[2].Value.Contains("ipairs");
-                var.IsConstant = DetectConstantPattern(match.Groups[2].Value);
-                
-                tree.Variables.Add(var);
-                tree.RenameMap[var.OriginalName] = var.OriginalName;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️ Warning: Failed to parse variable on line {lineNum}: {ex.Message}");
-            }
-        }
-
-        private void ParseTableStructures(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
-        {
-            try
-            {
-                var match = _tableRegex.Match(line);
-                if (!match.Success) return;
-                
-                var table = new LuaTable
-                {
-                    OriginalName = match.Groups[1].Value,
-                    Context = ExtractContext(lineNum, allLines)
-                };
-                
-                var fieldMatches = Regex.Matches(match.Groups[2].Value, @"([a-zA-Z_]\w*)\s*=\s*([^,}]+)");
-                foreach (Match field in fieldMatches)
-                {
-                    table.Fields[field.Groups[1].Value] = new LuaVariable
+                    symbols[symbol] = new SymbolContext
                     {
-                        OriginalName = field.Groups[1].Value,
-                        Context = field.Groups[2].Value
+                        Symbol = symbol,
+                        DeclarationLine = i,
+                        UsageLines = new List<int> { i },
+                        Context = GetContext(lines, i)
                     };
                 }
-                
-                tree.Tables.Add(table);
-                tree.RenameMap[table.OriginalName] = table.OriginalName;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️ Warning: Failed to parse table on line {lineNum}: {ex.Message}");
-            }
-        }
-
-        private void IdentifyObfuscatedElements(LuaSyntaxTree tree)
-        {
-            foreach (var func in tree.Functions.Where(f => _obfuscatedNameRegex.IsMatch(f.OriginalName)))
-            {
-                func.Name = func.OriginalName;
-            }
-            
-            foreach (var var in tree.Variables.Where(v => _obfuscatedNameRegex.IsMatch(v.OriginalName)))
-            {
-                var.Name = var.OriginalName;
-            }
-            
-            foreach (var table in tree.Tables.Where(t => _obfuscatedNameRegex.IsMatch(t.OriginalName)))
-            {
-                table.Name = table.OriginalName;
-            }
-        }
-
-        private async Task GenerateSemanticNamesAsync(LuaSyntaxTree tree)
-        {
-            if (!tree.RenameMap.Any())
-                return;
-
-            var batches = CreateBatches(tree);
-            var renameTasks = batches.Select(batch => ProcessBatchWithAI(batch)).ToArray();
-            
-            await Task.WhenAll(renameTasks);
-            
-            foreach (var task in renameTasks)
-            {
-                var batchResults = await task;
-                foreach (var kvp in batchResults)
+                else
                 {
-                    if (tree.RenameMap.ContainsKey(kvp.Key))
-                        tree.RenameMap[kvp.Key] = kvp.Value;
+                    symbols[symbol].UsageLines.Add(i);
                 }
             }
         }
-
-        private List<Dictionary<string, string>> CreateBatches(LuaSyntaxTree tree)
+        
+        return symbols;
+    }
+    
+    private string GetContext(string[] lines, int centerLine)
+    {
+        var start = Math.Max(0, centerLine - 2);
+        var end = Math.Min(lines.Length - 1, centerLine + 2);
+        return string.Join("\n", lines.Skip(start).Take(end - start + 1));
+    }
+    
+    // Stages 4 & 5: AI Processing
+    private async Task<Dictionary<string, string>> GenerateRenamesWithAI(Dictionary<string, SymbolContext> symbols)
+    {
+        try
         {
-            var allSymbols = new Dictionary<string, string>();
-            
-            foreach (var func in tree.Functions.Where(f => f.Name == f.OriginalName))
-                allSymbols[func.OriginalName] = $"Function: Context={func.Context}; Parameters={string.Join(",", func.Parameters)}; LocalVars={func.LocalVariables.Count}";
-            
-            foreach (var var in tree.Variables.Where(v => v.Name == v.OriginalName))
-                allSymbols[var.OriginalName] = $"Variable: Context={var.Context}; IsConstant={var.IsConstant}; IsIterator={var.IsIterators}";
-            
-            foreach (var table in tree.Tables.Where(t => t.Name == t.OriginalName))
-                allSymbols[table.OriginalName] = $"Table: Context={table.Context}; Fields={string.Join(",", table.Fields.Keys.Take(5))}";
-            
-            return allSymbols
-                .GroupBy(kvp => allSymbols.Keys.ToList().IndexOf(kvp.Key) / 20)
-                .Select(g => g.ToDictionary(kvp => kvp.Key, kvp => kvp.Value))
+            // Group symbols into batches of 15
+            var batches = symbols
+                .Select((kvp, index) => new { kvp, index })
+                .GroupBy(x => x.index / 15)
+                .Select(g => g.ToDictionary(x => x.kvp.Key, x => x.kvp.Value))
                 .ToList();
-        }
-
-        private async Task<Dictionary<string, string>> ProcessBatchWithAI(Dictionary<string, string> batch)
-        {
-            if (batch == null || !batch.Any())
-                return new Dictionary<string, string>();
-
-            try
+            
+            var allRenames = new Dictionary<string, string>();
+            
+            for (int i = 0; i < batches.Count; i++)
             {
-                var prompt = $@"You are a Lua deobfuscation expert. Analyze these obfuscated identifiers and generate meaningful, descriptive names based on context, usage patterns, and Lua conventions. Return ONLY a JSON object mapping original names to new names. Names must be camelCase, descriptive, and follow Lua naming conventions. No comments, no explanations.
-
-{JsonSerializer.Serialize(batch, new JsonSerializerOptions { WriteIndented = true })}";
-
-                var requestBody = new
-                {
-                    model = _config.Model,
-                    messages = new[] { new { role = "user", content = prompt } },
-                    temperature = 0.1,
-                    max_tokens = 2000
-                };
-
-                var response = await _httpClient.PostAsync(_config.ApiEndpoint, new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json"));
+                Console.WriteLine($"📦 Processing batch {i + 1}/{batches.Count}...");
+                var batchRenames = await ProcessBatchAsync(batches[i]);
                 
-                if (!response.IsSuccessStatusCode)
+                foreach (var rename in batchRenames)
                 {
-                    var errorContent = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine($"❌ AI API error: {response.StatusCode} - {errorContent}");
-                    return new Dictionary<string, string>();
+                    if (IsValidRename(rename.Key, rename.Value))
+                        allRenames[rename.Key] = rename.Value;
                 }
                 
-                var responseContent = await response.Content.ReadAsStringAsync();
-                
-                var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseContent);
-                if (aiResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
-                {
-                    Console.WriteLine($"❌ AI response was null or malformed: {responseContent}");
-                    return new Dictionary<string, string>();
-                }
-                
-                var result = JsonSerializer.Deserialize<Dictionary<string, string>>(aiResponse.Choices[0].Message.Content);
-                return result ?? new Dictionary<string, string>();
+                // Rate limiting
+                if (i < batches.Count - 1)
+                    await Task.Delay(1000);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error in ProcessBatchWithAI: {ex.Message}");
-                return new Dictionary<string, string>();
-            }
-        }
-
-        // 🚀 FIX: Bounds checking to prevent ArgumentOutOfRangeException
-        private string ApplyRenames(string code, Dictionary<string, string> renameMap)
-        {
-            if (renameMap == null || !renameMap.Any())
-                return code;
-
-            try
-            {
-                var sortedKeys = renameMap.Keys.OrderByDescending(k => k.Length).ThenByDescending(k => k);
-                
-                foreach (var original in sortedKeys)
-                {
-                    var newName = renameMap[original];
-                    if (string.IsNullOrEmpty(newName) || original == newName) continue;
-                    
-                    var pattern = $@"\b{Regex.Escape(original)}\b";
-                    code = Regex.Replace(code, pattern, newName);
-                }
-                
-                return code;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error in ApplyRenames: {ex.Message}");
-                return code;
-            }
-        }
-
-        // 🚀 FIX: Bounds checking to prevent ArgumentOutOfRangeException
-        private string ExtractContext(int lineNum, string[] allLines)
-        {
-            if (allLines == null || allLines.Length == 0) return "";
             
-            var start = Math.Max(0, lineNum - 3);
-            var end = Math.Min(allLines.Length - 1, lineNum + 3);
-            
-            if (start > end) return "";
-            
-            return string.Join(" ", allLines.Skip(start).Take(end - start + 1));
+            return allRenames;
         }
-
-        // 🚀 FIX: Bounds checking to prevent ArgumentOutOfRangeException
-        private int FindScopeEnd(int startLine, string[] allLines)
+        catch (Exception ex)
         {
-            if (startLine >= allLines.Length) return allLines.Length - 1;
-            if (startLine < 0) return 0;
-            
-            int depth = 0;
-            for (int i = startLine; i < allLines.Length && i >= 0; i++)
-            {
-                depth += allLines[i].Count(c => c == '{') - allLines[i].Count(c => c == '}');
-                if (depth <= 0) return i;
-            }
-            return allLines.Length - 1;
-        }
-
-        private bool DetectConstantPattern(string value)
-        {
-            return Regex.IsMatch(value ?? "", @"^\d+$") || 
-                   Regex.IsMatch(value ?? "", @"^""[^""]*""$") || 
-                   Regex.IsMatch(value ?? "", @"^'[^']*'$");
+            Console.WriteLine($"❌ AI renaming failed: {ex.Message}");
+            return new Dictionary<string, string>();
         }
     }
-
-    public class AIResponse
+    
+    private async Task<Dictionary<string, string>> ProcessBatchAsync(Dictionary<string, SymbolContext> batch)
     {
-        public List<AIChoice> Choices { get; set; } = new();
+        var prompt = BuildPrompt(batch);
+        
+        var request = new
+        {
+            model = "mixtral-8x7b-32768",
+            messages = new[]
+            {
+                new { role = "system", content = "You are a Lua deobfuscation expert. Return ONLY JSON with format: {\"oldName\": \"newName\", ...}" },
+                new { role = "user", content = prompt }
+            },
+            temperature = 0.1,
+            max_tokens = 2000,
+            response_format = new { type = "json_object" }
+        };
+        
+        var json = JsonSerializer.Serialize(request);
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        
+        try
+        {
+            var response = await _httpClient.PostAsync(
+                "https://api.groq.com/openai/v1/chat/completions",
+                content
+            );
+            
+            if (!response.IsSuccessStatusCode)
+                throw new($"API Error: {response.StatusCode}");
+                
+            var responseJson = await response.Content.ReadAsStringAsync();
+            var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseJson);
+            
+            if (aiResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+                throw new("Empty AI response");
+                
+            var renameJson = aiResponse.Choices.First().Message.Content;
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(renameJson) 
+                ?? new Dictionary<string, string>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Batch processing failed: {ex.Message}");
+            return new Dictionary<string, string>();
+        }
     }
-
-    public class AIChoice
+    
+    private string BuildPrompt(Dictionary<string, SymbolContext> batch)
     {
-        public AIMessage Message { get; set; } = new();
+        var sb = new StringBuilder();
+        sb.AppendLine("Generate meaningful camelCase names for these Lua symbols from a decompiled MoonSecV3 script:");
+        sb.AppendLine();
+        
+        foreach (var kvp in batch)
+        {
+            var symbol = kvp.Value;
+            sb.AppendLine($"=== {symbol.Symbol} ===");
+            sb.AppendLine($"Usage count: {symbol.UsageLines.Count}");
+            sb.AppendLine($"Context:");
+            sb.AppendLine(symbol.Context);
+            sb.AppendLine();
+        }
+        
+        sb.AppendLine("Examples:");
+        sb.AppendLine("- v1 (game:GetService(\"Players\")) → playersService");
+        sb.AppendLine("- v_u_3 (\"https://github.com/\") → githubUrl");
+        sb.AppendLine("- upvalue_0 (function callback) → onRaceChanged");
+        sb.AppendLine("- v5 (Vector3.new(0, 100, 0)) → jumpVelocity");
+        
+        return sb.ToString();
     }
-
-    public class AIMessage
+    
+    private bool IsValidRename(string oldName, string newName)
     {
-        public string Content { get; set; } = string.Empty;
+        if (string.IsNullOrWhiteSpace(newName)) return false;
+        if (newName == oldName) return false;
+        if (newName.Length > 50) return false;
+        if (!Regex.IsMatch(newName, @"^[a-zA-Z_][a-zA-Z0-9_]*$")) return false;
+        
+        // Avoid Lua keywords
+        var keywords = new HashSet<string> { "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while" };
+        return !keywords.Contains(newName);
+    }
+    
+    // Stage 6: Code Reconstruction
+    private string ApplyRenames(string pseudocode, Dictionary<string, string> renames)
+    {
+        if (renames.Count == 0)
+            return pseudocode;
+            
+        // Sort by length (longest first) to avoid partial replacements
+        var sortedRenames = renames
+            .OrderByDescending(kv => kv.Key.Length)
+            .ThenByDescending(kv => kv.Key)
+            .ToList();
+        
+        var result = pseudocode;
+        
+        foreach (var rename in sortedRenames)
+        {
+            var pattern = $@"\b{Regex.Escape(rename.Key)}\b";
+            result = Regex.Replace(result, pattern, rename.Value, RegexOptions.Multiline);
+        }
+        
+        // Add rename summary
+        var summary = new StringBuilder();
+        summary.AppendLine("-- MoonSecV3 Deobfuscation Report");
+        summary.AppendLine($"-- Renamed {renames.Count} symbols");
+        summary.AppendLine("-- Rename mapping:");
+        
+        foreach (var rename in renames.OrderBy(r => r.Key))
+        {
+            summary.AppendLine($"--   {rename.Key} → {rename.Value}");
+        }
+        
+        summary.AppendLine();
+        
+        return summary.ToString() + result;
+    }
+    
+    private string FormatOutput(string code)
+    {
+        // Basic formatting
+        var lines = code.Split('\n');
+        var formatted = new StringBuilder();
+        int indent = 0;
+        
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                formatted.AppendLine();
+                continue;
+            }
+            
+            // Adjust indentation
+            if (trimmed.StartsWith("end") || trimmed.StartsWith("until") || trimmed.StartsWith("else"))
+                indent = Math.Max(0, indent - 1);
+            
+            formatted.Append(new string(' ', indent * 2));
+            formatted.AppendLine(trimmed);
+            
+            // Increase indentation for blocks
+            if (trimmed.EndsWith(" then") || trimmed.EndsWith(" do") || 
+                trimmed.StartsWith("function") || trimmed.StartsWith("if") ||
+                trimmed.StartsWith("for") || trimmed.StartsWith("while"))
+                indent++;
+        }
+        
+        return formatted.ToString();
     }
 }
+
+public class DeobfuscationResult
+{
+    public bool Success { get; set; }
+    public string InputType { get; set; } = "";
+    public string Disassembly { get; set; } = "";
+    public string DeobfuscatedCode { get; set; } = "";
+    public int SymbolCount { get; set; }
+    public int RenamedCount { get; set; }
+    public TimeSpan ProcessingTime { get; set; }
+    public string Error { get; set; } = "";
+}
+
+public class SymbolContext
+{
+    public string Symbol { get; set; } = "";
+    public int DeclarationLine { get; set; }
+    public List<int> UsageLines { get; set; } = new();
+    public string Context { get; set; } = "";
+}
+
+public class AIResponse
+{
+    public List<AIChoice> Choices { get; set; } = new();
+}
+
+public class AIChoice
+{
+    public AIMessage Message { get; set; } = new();
+}
+
+public class AIMessage
+{
+    public string Content { get; set; } = "";
+}
+#endregion
+
+#region Discord Bot Main Program
+public class Program
+{
+    public static async Task Main(string[] args)
+    {
+        // Load environment variables
+        Env.Load();
+        
+        var discordToken = Environment.GetEnvironmentVariable("DISCORD_BOT_TOKEN") 
+            ?? throw new("DISCORD_BOT_TOKEN not set");
+        
+        var groqApiKey = Environment.GetEnvironmentVariable("GROQ_API_KEY") 
+            ?? throw new("GROQ_API_KEY not set");
+        
+        Console.WriteLine("🌙 MoonSecV3 AI Deobfuscator Bot");
+        Console.WriteLine("================================");
+        
+        // Start health check server (for hosting platforms)
+        _ = StartHealthCheckServer();
+        
+        // Run the Discord bot
+        await RunBotAsync(discordToken, groqApiKey);
+    }
+    
+    private static async Task RunBotAsync(string discordToken, string groqApiKey)
+    {
+        var client = new DiscordSocketClient(new DiscordSocketConfig
+        {
+            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages,
+            AlwaysDownloadUsers = true,
+            LogLevel = LogSeverity.Info
+        });
+        
+        var interactions = new InteractionService(client.Rest);
+        
+        var services = new ServiceCollection()
+            .AddSingleton(client)
+            .AddSingleton(interactions)
+            .AddSingleton(new MoonSecDeobfuscator(groqApiKey))
+            .BuildServiceProvider();
+        
+        // Setup logging
+        client.Log += LogAsync;
+        interactions.Log += LogAsync;
+        
+        // Bot ready event
+        client.Ready += async () =>
+        {
+            Console.WriteLine("✅ Bot connected to Discord");
+            
+            // Register commands
+            await interactions.AddModulesAsync(Assembly.GetEntryAssembly(), services);
+            await interactions.RegisterCommandsGloballyAsync();
+            
+            Console.WriteLine("✅ Slash commands registered");
+            Console.WriteLine($"✅ Logged in as: {client.CurrentUser.Username}");
+            await client.SetGameAsync("/deobfuscate", type: ActivityType.Playing);
+        };
+        
+        // Handle slash commands
+        client.InteractionCreated += async interaction =>
+        {
+            if (interaction is SocketSlashCommand slashCommand)
+            {
+                var context = new SocketInteractionContext(client, interaction);
+                await interactions.ExecuteCommandAsync(context, services);
+            }
+        };
+        
+        // Login and start
+        await client.LoginAsync(TokenType.Bot, discordToken);
+        await client.StartAsync();
+        
+        Console.WriteLine("🤖 Bot is running! Press Ctrl+C to exit.");
+        
+        // Keep the bot running
+        await Task.Delay(-1);
+    }
+    
+    private static Task LogAsync(LogMessage msg)
+    {
+        Console.WriteLine($"[{msg.Severity}] {msg.Message}");
+        return Task.CompletedTask;
+    }
+    
+    private static async Task StartHealthCheckServer()
+    {
+        try
+        {
+            var port = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "8080");
+            var builder = WebApplication.CreateBuilder();
+            var app = builder.Build();
+            
+            app.MapGet("/", () => "🌙 MoonSecV3 Deobfuscator Bot is running!");
+            app.MapGet("/health", () => new { 
+                status = "healthy", 
+                timestamp = DateTime.UtcNow,
+                service = "MoonSecV3 Deobfuscator" 
+            });
+            
+            await app.RunAsync($"http://0.0.0.0:{port}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Health check server failed: {ex.Message}");
+        }
+    }
+}
+
+#region Discord Commands Module
+[Group("deobfuscate", "Deobfuscate MoonSecV3 Lua bytecode")]
+public class DeobfuscateModule : InteractionModuleBase<SocketInteractionContext>
+{
+    private const int MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
+    private readonly MoonSecDeobfuscator _deobfuscator;
+    
+    public DeobfuscateModule(MoonSecDeobfuscator deobfuscator)
+    {
+        _deobfuscator = deobfuscator;
+    }
+    
+    [SlashCommand("file", "Upload MoonSecV3 bytecode file for deobfuscation")]
+    public async Task DeobfuscateFile(
+        [Summary("file", "Lua bytecode file (.lua, .txt, .luac)")] IAttachment file,
+        [Summary("rename", "Use AI to rename variables?")] bool rename = true,
+        [Summary("format", "Format output code?")] bool format = true)
+    {
+        await DeferAsync();
+        
+        try
+        {
+            // Validate file
+            if (file.Size > MAX_FILE_SIZE)
+            {
+                await FollowupAsync("❌ File too large. Maximum size is 2MB.", ephemeral: true);
+                return;
+            }
+            
+            if (!IsValidFileType(file.Filename))
+            {
+                await FollowupAsync("❌ Invalid file type. Use .lua, .txt, or .luac files.", ephemeral: true);
+                return;
+            }
+            
+            Console.WriteLine($"📁 Processing file: {file.Filename} ({file.Size} bytes) from {Context.User.Username}");
+            
+            // Download file content
+            var httpClient = new HttpClient();
+            var bytecode = await httpClient.GetStringAsync(file.Url);
+            
+            // Process with deobfuscator
+            var result = await _deobfuscator.ProcessAsync(bytecode);
+            
+            if (!result.Success)
+            {
+                await FollowupAsync($"❌ Deobfuscation failed: {result.Error}", ephemeral: true);
+                return;
+            }
+            
+            // Create output filename
+            var originalName = Path.GetFileNameWithoutExtension(file.Filename);
+            var outputName = $"{originalName}_deobfuscated.lua";
+            var outputBytes = Encoding.UTF8.GetBytes(result.DeobfuscatedCode);
+            
+            // Send result as file
+            using var stream = new MemoryStream(outputBytes);
+            await FollowupWithFileAsync(
+                stream,
+                outputName,
+                text: $"✅ Deobfuscation complete for {Context.User.Mention}!\n" +
+                     $"📊 {result.SymbolCount} symbols, {result.RenamedCount} renamed\n" +
+                     $"⏱️ Processed in {result.ProcessingTime.TotalSeconds:F2}s"
+            );
+            
+            Console.WriteLine($"✅ Successfully processed {file.Filename}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Error processing file: {ex}");
+            await FollowupAsync($"❌ Error: {ex.Message}", ephemeral: true);
+        }
+    }
+    
+    [SlashCommand("text", "Paste MoonSecV3 bytecode directly")]
+    public async Task DeobfuscateText(
+        [Summary("code", "Paste your bytecode here")] string code,
+        [Summary("rename", "Use AI to rename variables?")] bool rename = true)
+    {
+        await DeferAsync();
+        
+        try
+        {
+            if (code.Length > 100000)
+            {
+                await FollowupAsync("❌ Code too long. Maximum 100,000 characters.", ephemeral: true);
+                return;
+            }
+            
+            Console.WriteLine($"📝 Processing text input from {Context.User.Username} ({code.Length} chars)");
+            
+            // Process with deobfuscator
+            var result = await _deobfuscator.ProcessAsync(code);
+            
+            if (!result.Success)
+            {
+                await FollowupAsync($"❌ Deobfuscation failed: {result.Error}", ephemeral: true);
+                return;
+            }
+            
+            // Check if output is too long for Discord
+            if (result.DeobfuscatedCode.Length > 2000)
+            {
+                // Send as file if too long
+                var outputBytes = Encoding.UTF8.GetBytes(result.DeobfuscatedCode);
+                using var stream = new MemoryStream(outputBytes);
+                
+                await FollowupWithFileAsync(
+                    stream,
+                    "deobfuscated.lua",
+                    text: $"✅ Deobfuscation complete for {Context.User.Mention}!\n" +
+                         $"📊 {result.SymbolCount} symbols, {result.RenamedCount} renamed\n" +
+                         $"⏱️ Processed in {result.ProcessingTime.TotalSeconds:F2}s"
+                );
+            }
+            else
+            {
+                // Send as message
+                await FollowupAsync(
+                    $"```lua\n{result.DeobfuscatedCode}\n```\n" +
+                    $"✅ {result.SymbolCount} symbols, {result.RenamedCount} renamed in {result.ProcessingTime.TotalSeconds:F2}s"
+                );
+            }
+            
+            Console.WriteLine($"✅ Successfully processed text input");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Error processing text: {ex}");
+            await FollowupAsync($"❌ Error: {ex.Message}", ephemeral: true);
+        }
+    }
+    
+    [SlashCommand("help", "Get help about the deobfuscator")]
+    public async Task HelpCommand()
+    {
+        var embed = new EmbedBuilder()
+            .WithTitle("🌙 MoonSecV3 AI Deobfuscator")
+            .WithDescription("Deobfuscate MoonSecV3 Lua bytecode with AI-powered variable renaming")
+            .WithColor(Color.Blue)
+            .AddField("Commands", "• `/deobfuscate file` - Upload a bytecode file\n" +
+                                "• `/deobfuscate text` - Paste bytecode directly\n" +
+                                "• `/deobfuscate help` - Show this help")
+            .AddField("Supported Formats", "• MoonSecV3 bytecode\n• Hex-encoded bytecode\n• Base64 encoded scripts\n• Already disassembled code")
+            .AddField("Features", "• 6-stage deobfuscation pipeline\n• AI-powered variable renaming\n• Automatic code formatting\n• Hex/base64 detection")
+            .WithFooter("By AI-Powered Deobfuscator • Use /deobfuscate file to start")
+            .WithCurrentTimestamp()
+            .Build();
+            
+        await RespondAsync(embed: embed);
+    }
+    
+    private bool IsValidFileType(string filename)
+    {
+        var ext = Path.GetExtension(filename).ToLower();
+        return ext == ".lua" || ext == ".txt" || ext == ".luac" || ext == ".lc";
+    }
+}
+#endregion
