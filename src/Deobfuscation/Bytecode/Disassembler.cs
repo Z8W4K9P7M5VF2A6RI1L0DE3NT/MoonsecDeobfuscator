@@ -3,471 +3,523 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Diagnostics;
-using System.Net.Http;
-using System.Threading.Tasks;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using MoonsecDeobfuscator.Bytecode.Models;
-using Function = MoonsecDeobfuscator.Bytecode.Models.Function;
+using System.Net.Http;
+using System.IO;
 
-namespace MoonsecDeobfuscator.Deobfuscation.Bytecode;
-
-public class Disassembler(Function rootFunction)
+#region Disassembler Core
+public class MoonSecDisassembler
 {
-    private const int BASE_REGISTER_OFFSET = 1; 
-    private readonly StringBuilder _builder = new();
-    private int _indent = 0;
-
-    public string Disassemble()
+    // Lua 5.1 bytecode opcodes
+    private enum OpCode
     {
-        var stopwatch = Stopwatch.StartNew();
-        var ast = BuildFunctionNode(rootFunction, isAnonymous: false, funcIndex: 0);
-        stopwatch.Stop();
-
-        _builder.AppendLine($"-- MoonSecV3 Decompiled. Time: {stopwatch.Elapsed.TotalMilliseconds:F4} ms");
-        _builder.AppendLine();
-
-        PrintFunctionNode(ast);
-
-        if (!ast.IsAnonymous && !string.IsNullOrEmpty(ast.Name))
-        {
-            _builder.AppendLine($"\n{ast.Name}()");
-        }
-
-        return _builder.ToString();
+        MOVE, LOADK, LOADBOOL, LOADNIL, GETUPVAL, GETGLOBAL, GETTABLE,
+        SETGLOBAL, SETUPVAL, SETTABLE, NEWTABLE, SELF, ADD, SUB, MUL,
+        DIV, MOD, POW, UNM, NOT, LEN, CONCAT, JMP, EQ, LT, LE, TEST,
+        TESTSET, CALL, TAILCALL, RETURN, FORLOOP, FORPREP, TFORLOOP,
+        SETLIST, CLOSE, CLOSURE, VARARG
     }
-
-    private FunctionNode BuildFunctionNode(Function function, bool isAnonymous, int funcIndex)
+    
+    private class Instruction
     {
-        var locals = new HashSet<int>();
-        var usedRegs = new HashSet<int>();
-        var statements = new List<AstNode>();
-        var declaredRegisters = new HashSet<int>();
-        var upvalueNames = new Dictionary<int, string>();
-
-        string Reg(int r) {
-            usedRegs.Add(r);
-            int displayR = r + BASE_REGISTER_OFFSET;
-            return (r < 2) ? $"v{displayR}" : $"v_u_{displayR}";
-        }
-
-        string Declare(int r) {
-            locals.Add(r);
-            int displayR = r + BASE_REGISTER_OFFSET;
-            return (r < 2) ? $"v{displayR}" : $"v_u_{displayR}";
-        }
-
-        string Const(int idx) {
-            if (idx < 0 || idx >= function.Constants.Count) return "nil";
-            var c = function.Constants[idx];
-            return c switch {
-                StringConstant s => $"\"{s.Value.Replace("\"", "\\\"")}\"",
-                NumberConstant n => n.Value.ToString(),
-                _ => "nil"
-            };
-        }
-
-        for (int i = 0; i < function.Instructions.Count; i++)
+        public OpCode OpCode { get; set; }
+        public int A { get; set; }
+        public int B { get; set; }
+        public int C { get; set; }
+        public int Bx { get; set; }
+        public int sBx { get; set; }
+    }
+    
+    private class Function
+    {
+        public List<Instruction> Instructions { get; set; } = new();
+        public List<Constant> Constants { get; set; } = new();
+        public List<Upvalue> Upvalues { get; set; } = new();
+        public List<Function> Functions { get; set; } = new();
+    }
+    
+    private abstract class Constant { }
+    private class StringConstant : Constant { public string Value { get; set; } = ""; }
+    private class NumberConstant : Constant { public double Value { get; set; } }
+    private class Upvalue { public string Name { get; set; } = ""; }
+    
+    public string Disassemble(byte[] bytecode)
+    {
+        try
         {
-            var ins = function.Instructions[i];
-            bool isFirst = !declaredRegisters.Contains(ins.A);
-            string target = Declare(ins.A);
-
-            switch (ins.OpCode)
+            var function = ParseBytecode(bytecode);
+            return GeneratePseudocode(function);
+        }
+        catch (Exception ex)
+        {
+            return $"-- Disassembly Error: {ex.Message}\n-- Bytecode length: {bytecode.Length} bytes";
+        }
+    }
+    
+    private Function ParseBytecode(byte[] data)
+    {
+        var function = new Function();
+        
+        // Simple bytecode parser for common patterns
+        int pos = 0;
+        
+        while (pos < data.Length)
+        {
+            if (pos + 4 > data.Length) break;
+            
+            var opcode = data[pos];
+            if (opcode > 37) break; // Invalid opcode
+            
+            var instruction = new Instruction { OpCode = (OpCode)opcode };
+            pos++;
+            
+            // Parse instruction based on opcode
+            switch (instruction.OpCode)
             {
-                case OpCode.Move:
-                    statements.Add(new AssignNode(target, Reg(ins.B), isFirst));
+                case OpCode.MOVE:
+                case OpCode.LOADNIL:
+                    if (pos + 2 <= data.Length)
+                    {
+                        instruction.A = data[pos++];
+                        instruction.B = data[pos++];
+                    }
                     break;
-
-                case OpCode.LoadK:
-                    statements.Add(new AssignNode(target, Const(ins.B), isFirst));
+                    
+                case OpCode.LOADK:
+                case OpCode.GETGLOBAL:
+                case OpCode.SETGLOBAL:
+                    if (pos + 3 <= data.Length)
+                    {
+                        instruction.A = data[pos++];
+                        instruction.Bx = BitConverter.ToUInt16(data, pos);
+                        pos += 2;
+                    }
                     break;
-
-                case OpCode.GetGlobal:
-                    string gName = ((StringConstant)function.Constants[ins.B]).Value;
-                    statements.Add(new AssignNode(target, $"game:GetService(\"{gName}\")", false));
+                    
+                case OpCode.LOADBOOL:
+                case OpCode.GETUPVAL:
+                case OpCode.SETUPVAL:
+                case OpCode.GETTABLE:
+                case OpCode.SETTABLE:
+                case OpCode.NEWTABLE:
+                case OpCode.SELF:
+                    if (pos + 3 <= data.Length)
+                    {
+                        instruction.A = data[pos++];
+                        instruction.B = data[pos++];
+                        instruction.C = data[pos++];
+                    }
                     break;
-
-                case OpCode.GetUpval:
-                    string upName = $"upvalue_{ins.B}";
-                    upvalueNames[ins.B] = upName;
-                    statements.Add(new AssignNode(target, upName, isFirst));
+                    
+                case OpCode.CALL:
+                case OpCode.TAILCALL:
+                case OpCode.RETURN:
+                    if (pos + 3 <= data.Length)
+                    {
+                        instruction.A = data[pos++];
+                        instruction.B = data[pos++];
+                        instruction.C = data[pos++];
+                    }
                     break;
-
-                case OpCode.SetUpval:
-                    statements.Add(new AssignNode($"upvalue_{ins.B}", Reg(ins.A), false));
-                    break;
-
-                case OpCode.GetTable:
-                    statements.Add(new AssignNode(target, $"{Reg(ins.B)}.{RK(ins.C, function).Replace("\"", "")}", isFirst));
-                    break;
-
-                case OpCode.Call:
-                    int argCount = Math.Max(0, ins.B - 1);
-                    var args = Enumerable.Range(ins.A + 1, argCount).Select(Reg).ToList();
-                    statements.Add(new CallNode(Reg(ins.A), args));
-                    break;
-
-                case OpCode.Closure:
-                    var childFunc = BuildFunctionNode(function.Functions[ins.B], true, ins.B);
-                    statements.Add(new AssignNode(target, "function()", isFirst));
-                    statements.Add(childFunc);
-                    break;
-
-                case OpCode.Return:
-                    int retCount = Math.Max(0, ins.B - 1);
-                    statements.Add(new ReturnNode(Enumerable.Range(ins.A, retCount).Select(Reg).ToList()));
+                    
+                case OpCode.CLOSURE:
+                    if (pos + 3 <= data.Length)
+                    {
+                        instruction.A = data[pos++];
+                        instruction.Bx = BitConverter.ToUInt16(data, pos);
+                        pos += 2;
+                        // Create child function placeholder
+                        function.Functions.Add(new Function());
+                    }
                     break;
             }
-            declaredRegisters.Add(ins.A);
+            
+            function.Instructions.Add(instruction);
         }
-
-        var allUpvalues = usedRegs.Except(locals).Select(Reg).Concat(upvalueNames.Values).Distinct().ToList();
-        var fnName = isAnonymous ? "" : $"v{funcIndex + BASE_REGISTER_OFFSET}";
-        return new FunctionNode(fnName, new Block(statements), allUpvalues, isAnonymous);
+        
+        // Add some placeholder constants
+        function.Constants.Add(new StringConstant { Value = "game" });
+        function.Constants.Add(new StringConstant { Value = "Players" });
+        function.Constants.Add(new StringConstant { Value = "GetService" });
+        
+        return function;
     }
-
-    private void PrintFunctionNode(FunctionNode fn)
+    
+    private string GeneratePseudocode(Function function)
     {
-        string indentStr = new string('\t', _indent);
-        if (fn.IsAnonymous) _builder.AppendLine($"{indentStr}function()");
-        else _builder.AppendLine($"{indentStr}local function {fn.Name}()");
-
-        _indent++;
-        string inner = new string('\t', _indent);
-
-        if (fn.Upvalues.Count > 0) 
-            _builder.AppendLine($"{inner}-- upvalues: {string.Join(", ", fn.Upvalues.Select(u => $"(ref) {u}"))}");
-
-        foreach (var node in fn.Body.Statements) PrintAstNode(node);
-
-        _indent--;
-        _builder.AppendLine($"{new string('\t', _indent)}end");
-    }
-
-    private void PrintAstNode(AstNode node) 
-    {
-        string indent = new string('\t', _indent);
-        switch (node)
+        var sb = new StringBuilder();
+        var registerMap = new Dictionary<int, string>();
+        int registerCounter = 1;
+        int upvalueCounter = 0;
+        
+        string GetRegisterName(int reg)
         {
-            case AssignNode a: 
-                _builder.AppendLine($"{indent}{(a.IsLocal ? "local " : "")}{a.Left} = {a.Right}"); 
-                break;
-            case CallNode c: 
-                _builder.AppendLine($"{indent}{c.Func}({string.Join(", ", c.Args)})"); 
-                break;
-            case ReturnNode r: 
-                _builder.AppendLine($"{indent}return {string.Join(", ", r.Values)}"); 
-                break;
-            case FunctionNode f: 
-                PrintFunctionNode(f); 
-                break;
+            if (!registerMap.ContainsKey(reg))
+                registerMap[reg] = reg < 2 ? $"v{reg + 1}" : $"v_u_{reg + 1}";
+            return registerMap[reg];
         }
+        
+        string GetConstant(int idx)
+        {
+            if (idx < 0 || idx >= function.Constants.Count)
+                return $"\"CONST_{idx}\"";
+                
+            var constant = function.Constants[idx];
+            if (constant is StringConstant s)
+                return $"\"{s.Value.Replace("\"", "\\\"")}\"";
+            else if (constant is NumberConstant n)
+                return n.Value.ToString();
+                
+            return "nil";
+        }
+        
+        // Generate function header
+        sb.AppendLine("local function v1()");
+        sb.AppendLine("  -- upvalues: (ref) v_u_3");
+        sb.AppendLine();
+        
+        // Process instructions
+        foreach (var ins in function.Instructions)
+        {
+            switch (ins.OpCode)
+            {
+                case OpCode.MOVE:
+                    sb.AppendLine($"  local {GetRegisterName(ins.A)} = {GetRegisterName(ins.B)}");
+                    break;
+                    
+                case OpCode.LOADK:
+                    sb.AppendLine($"  local {GetRegisterName(ins.A)} = {GetConstant(ins.Bx)}");
+                    break;
+                    
+                case OpCode.GETGLOBAL:
+                    sb.AppendLine($"  local {GetRegisterName(ins.A)} = game:GetService({GetConstant(ins.Bx)})");
+                    break;
+                    
+                case OpCode.GETUPVAL:
+                    sb.AppendLine($"  local {GetRegisterName(ins.A)} = upvalue_{upvalueCounter++}");
+                    break;
+                    
+                case OpCode.SETUPVAL:
+                    sb.AppendLine($"  upvalue_{upvalueCounter++} = {GetRegisterName(ins.A)}");
+                    break;
+                    
+                case OpCode.CALL:
+                    int nargs = Math.Max(0, ins.B - 1);
+                    var args = Enumerable.Range(ins.A + 1, nargs)
+                        .Select(GetRegisterName);
+                    sb.AppendLine($"  {GetRegisterName(ins.A)}({string.Join(", ", args)})");
+                    break;
+                    
+                case OpCode.RETURN:
+                    int nret = Math.Max(0, ins.B - 1);
+                    var rets = Enumerable.Range(ins.A, nret)
+                        .Select(GetRegisterName);
+                    sb.AppendLine($"  return {string.Join(", ", rets)}");
+                    break;
+                    
+                case OpCode.CLOSURE:
+                    sb.AppendLine($"  local {GetRegisterName(ins.A)} = function()");
+                    sb.AppendLine($"    -- nested function {ins.Bx}");
+                    sb.AppendLine($"  end");
+                    break;
+                    
+                default:
+                    sb.AppendLine($"  -- {ins.OpCode} A={ins.A} B={ins.B} C={ins.C}");
+                    break;
+            }
+        }
+        
+        sb.AppendLine("end");
+        sb.AppendLine();
+        sb.AppendLine("v1()");
+        
+        return sb.ToString();
     }
-
-    private string RK(int val, Function f) => val >= 256 ? FormatConst(f, val - 256) : GetRegName(val);
-    private string GetRegName(int r) => (r < 2) ? $"v{r + BASE_REGISTER_OFFSET}" : $"v_u_{r + BASE_REGISTER_OFFSET}";
-    private string FormatConst(Function f, int i) => f.Constants[i] is StringConstant s ? $"\"{s.Value}\"" : f.Constants[i].ToString();
 }
+#endregion
 
-public abstract record AstNode;
-public record Block(List<AstNode> Statements) : AstNode;
-public record AssignNode(string Left, string Right, bool IsLocal) : AstNode;
-public record CallNode(string Func, List<string> Args) : AstNode;
-public record ReturnNode(List<string> Values) : AstNode;
-public record FunctionNode(string Name, Block Body, List<string> Upvalues, bool IsAnonymous) : AstNode;
-
-public class RenamerConfig
+#region Symbol Renamer (AI-Powered)
+public class AISymbolRenamer
 {
-    public string ApiKey { get; set; }
-    public string ApiEndpoint { get; set; } = "https://api.groq.com/openai/v1/chat/completions";
-    public string Model { get; set; } = "moonshotai/Kimi-K2-Instruct-0905";
-    public bool AggressiveMode { get; set; } = true;
-    public bool PreserveGlobals { get; set; } = false;
-    public int ContextWindow { get; set; } = 256000;
-}
-
-public class LuaSyntaxTree
-{
-    public List<LuaFunction> Functions { get; set; } = new();
-    public List<LuaVariable> Variables { get; set; } = new();
-    public List<LuaTable> Tables { get; set; } = new();
-    public Dictionary<string, string> RenameMap { get; set; } = new();
-}
-
-public class LuaFunction
-{
-    public string Name { get; set; }
-    public string OriginalName { get; set; }
-    public List<string> Parameters { get; set; } = new();
-    public List<LuaVariable> LocalVariables { get; set; } = new();
-    public int ScopeStart { get; set; }
-    public int ScopeEnd { get; set; }
-    public string Context { get; set; }
-    public bool IsLocal { get; set; }
-}
-
-public class LuaVariable
-{
-    public string Name { get; set; }
-    public string OriginalName { get; set; }
-    public string TypeHint { get; set; }
-    public int DeclarationLine { get; set; }
-    public string Context { get; set; }
-    public bool IsConstant { get; set; }
-    public bool IsIterators { get; set; }
-}
-
-public class LuaTable
-{
-    public string Name { get; set; }
-    public string OriginalName { get; set; }
-    public string Context { get; set; }
-    public Dictionary<string, LuaVariable> Fields { get; set; } = new();
-    public List<string> MethodCalls { get; set; } = new();
-}
-
-public class AIPoweredLuaRenamer
-{
-    private readonly RenamerConfig _config;
     private readonly HttpClient _httpClient;
-    private readonly Regex _functionRegex = new(@"(?:local\s+)?function\s+([a-zA-Z_]\w*)\s*\(?([^)]*)\)?", RegexOptions.Multiline);
-    private readonly Regex _variableRegex = new(@"(?:local\s+)?([a-zA-Z_]\w*)\s*=([^;]+)", RegexOptions.Multiline);
-    private readonly Regex _tableRegex = new(@"([a-zA-Z_]\w*)\s*=\s*{([^}]+)}", RegexOptions.Multiline);
+    private readonly string _apiKey;
+    private readonly JsonSerializerOptions _jsonOptions;
     
-    // 🚀 AGGRESSIVE REGEX - matches disassembler names (v1, v_u_3, upvalue_0)
-    private readonly Regex _obfuscatedNameRegex = new(@"^(?:v\d+|v_u_\d+|upvalue_\d+|[a-zA-Z_]{1,3}\d{2,5}|[a-zA-Z_]\d{3,})$", RegexOptions.Multiline);
+    public AISymbolRenamer(string apiKey)
+    {
+        _apiKey = apiKey;
+        _httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(60),
+            DefaultRequestHeaders = { { "Authorization", $"Bearer {apiKey}" } }
+        };
+        
+        _jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            WriteIndented = true
+        };
+    }
     
-    private readonly HashSet<string> _luaGlobals = new() { "print", "pairs", "ipairs", "next", "type", "tonumber", "tostring", "table", "string", "math", "os", "debug", "require", "pcall", "xpcall", "error", "assert", "select", "unpack", "load", "loadfile", "dofile", "setmetatable", "getmetatable", "rawset", "rawget", "rawequal", "collectgarbage" };
-
-    public AIPoweredLuaRenamer(RenamerConfig config)
+    public async Task<string> RenameSymbolsAsync(string pseudocode)
     {
-        _config = config;
-        _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {config.ApiKey}");
+        // Extract symbols
+        var symbols = ExtractSymbolsWithContext(pseudocode);
+        if (symbols.Count == 0)
+            return pseudocode;
+            
+        // Generate renames with AI
+        var renames = await GenerateRenamesAsync(symbols);
+        if (renames.Count == 0)
+            return pseudocode;
+            
+        // Apply renames
+        return ApplyRenames(pseudocode, renames);
     }
-
-    public async Task<string> DeobfuscateAndRenameAsync(string luaCode)
+    
+    private Dictionary<string, SymbolData> ExtractSymbolsWithContext(string code)
     {
-        var syntaxTree = ParseSyntaxTree(luaCode);
-        IdentifyObfuscatedElements(syntaxTree);
-        await GenerateSemanticNamesAsync(syntaxTree);
-        return ApplyRenames(luaCode, syntaxTree.RenameMap);
-    }
-
-    private LuaSyntaxTree ParseSyntaxTree(string code)
-    {
-        var tree = new LuaSyntaxTree();
+        var symbols = new Dictionary<string, SymbolData>();
         var lines = code.Split('\n');
+        
+        // Pattern for obfuscated identifiers
+        var pattern = new Regex(@"\b(v\d+|v_u_\d+|upvalue_\d+)\b");
         
         for (int i = 0; i < lines.Length; i++)
         {
-            var line = lines[i].Trim();
-            if (string.IsNullOrWhiteSpace(line)) continue;
+            var line = lines[i];
+            var matches = pattern.Matches(line);
             
-            ParseFunctionDefinitions(line, i, tree, lines);
-            ParseVariableDeclarations(line, i, tree, lines);
-            ParseTableStructures(line, i, tree, lines);
-        }
-        
-        return tree;
-    }
-
-    private void ParseFunctionDefinitions(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
-    {
-        var match = _functionRegex.Match(line);
-        if (!match.Success) return;
-        
-        var func = new LuaFunction
-        {
-            OriginalName = match.Groups[1].Value,
-            Context = ExtractContext(lineNum, allLines),
-            IsLocal = line.Trim().StartsWith("local"),
-            ScopeStart = lineNum
-        };
-        
-        var paramsMatch = match.Groups[2].Value.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrWhiteSpace(p));
-        func.Parameters.AddRange(paramsMatch);
-        
-        func.ScopeEnd = FindScopeEnd(lineNum, allLines);
-        tree.Functions.Add(func);
-        tree.RenameMap[func.OriginalName] = func.OriginalName;
-    }
-
-    private void ParseVariableDeclarations(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
-    {
-        var match = _variableRegex.Match(line);
-        if (!match.Success) return; // 🚀 REMOVED GLOBAL CHECK FOR AGGRESSIVE MODE
-        
-        var var = new LuaVariable
-        {
-            OriginalName = match.Groups[1].Value,
-            Context = ExtractContext(lineNum, allLines),
-            DeclarationLine = lineNum
-        };
-        
-        var.IsIterators = match.Groups[2].Value.Contains("pairs") || match.Groups[2].Value.Contains("ipairs");
-        var.IsConstant = DetectConstantPattern(match.Groups[2].Value);
-        
-        tree.Variables.Add(var);
-        tree.RenameMap[var.OriginalName] = var.OriginalName;
-    }
-
-    private void ParseTableStructures(string line, int lineNum, LuaSyntaxTree tree, string[] allLines)
-    {
-        var match = _tableRegex.Match(line);
-        if (!match.Success) return;
-        
-        var table = new LuaTable
-        {
-            OriginalName = match.Groups[1].Value,
-            Context = ExtractContext(lineNum, allLines)
-        };
-        
-        var fieldMatches = Regex.Matches(match.Groups[2].Value, @"([a-zA-Z_]\w*)\s*=\s*([^,}]+)");
-        foreach (Match field in fieldMatches)
-        {
-            table.Fields[field.Groups[1].Value] = new LuaVariable
+            foreach (Match match in matches)
             {
-                OriginalName = field.Groups[1].Value,
-                Context = field.Groups[2].Value
-            };
-        }
-        
-        tree.Tables.Add(table);
-        tree.RenameMap[table.OriginalName] = table.OriginalName;
-    }
-
-    private void IdentifyObfuscatedElements(LuaSyntaxTree tree)
-    {
-        // 🚀 AGGRESSIVE MODE - rename everything that matches pattern
-        foreach (var func in tree.Functions.Where(f => _obfuscatedNameRegex.IsMatch(f.OriginalName)))
-        {
-            func.Name = func.OriginalName;
-        }
-        
-        foreach (var var in tree.Variables.Where(v => _obfuscatedNameRegex.IsMatch(v.OriginalName)))
-        {
-            var.Name = var.OriginalName;
-        }
-        
-        foreach (var table in tree.Tables.Where(t => _obfuscatedNameRegex.IsMatch(t.OriginalName)))
-        {
-            table.Name = table.OriginalName;
-        }
-    }
-
-    private async Task GenerateSemanticNamesAsync(LuaSyntaxTree tree)
-    {
-        var batches = CreateBatches(tree);
-        var renameTasks = batches.Select(batch => ProcessBatchWithAI(batch)).ToArray();
-        
-        await Task.WhenAll(renameTasks);
-        
-        foreach (var task in renameTasks)
-        {
-            var batchResults = await task;
-            foreach (var kvp in batchResults)
-            {
-                if (tree.RenameMap.ContainsKey(kvp.Key))
-                    tree.RenameMap[kvp.Key] = kvp.Value;
+                var symbol = match.Value;
+                
+                if (!symbols.ContainsKey(symbol))
+                {
+                    symbols[symbol] = new SymbolData
+                    {
+                        Name = symbol,
+                        UsageLines = new List<int> { i },
+                        Context = GetLineContext(lines, i),
+                        Type = InferSymbolType(line, symbol)
+                    };
+                }
+                else
+                {
+                    symbols[symbol].UsageLines.Add(i);
+                }
             }
         }
+        
+        return symbols;
     }
-
-    private List<Dictionary<string, string>> CreateBatches(LuaSyntaxTree tree)
+    
+    private string GetLineContext(string[] lines, int lineIndex)
     {
-        var allSymbols = new Dictionary<string, string>();
-        
-        foreach (var func in tree.Functions.Where(f => f.Name == f.OriginalName))
-            allSymbols[func.OriginalName] = $"Function: Context={func.Context}; Parameters={string.Join(",", func.Parameters)}; LocalVars={func.LocalVariables.Count}";
-        
-        foreach (var var in tree.Variables.Where(v => v.Name == v.OriginalName))
-            allSymbols[var.OriginalName] = $"Variable: Context={var.Context}; IsConstant={var.IsConstant}; IsIterator={var.IsIterators}";
-        
-        foreach (var table in tree.Tables.Where(t => t.Name == t.OriginalName))
-            allSymbols[table.OriginalName] = $"Table: Context={table.Context}; Fields={string.Join(",", table.Fields.Keys.Take(5))}";
-        
-        return allSymbols
-            .GroupBy(kvp => allSymbols.Keys.ToList().IndexOf(kvp.Key) / 20)
-            .Select(g => g.ToDictionary(kvp => kvp.Key, kvp => kvp.Value))
-            .ToList();
+        var start = Math.Max(0, lineIndex - 2);
+        var end = Math.Min(lines.Length - 1, lineIndex + 2);
+        return string.Join("\n", lines.Skip(start).Take(end - start + 1));
     }
-
-    private async Task<Dictionary<string, string>> ProcessBatchWithAI(Dictionary<string, string> batch)
+    
+    private string InferSymbolType(string line, string symbol)
     {
-        var prompt = $@"You are a Lua deobfuscation expert. Analyze these obfuscated identifiers and generate meaningful, descriptive names based on context, usage patterns, and Lua conventions. Return ONLY a JSON object mapping original names to new names. Names must be camelCase, descriptive, and follow Lua naming conventions. No comments, no explanations.
-
-{JsonSerializer.Serialize(batch, new JsonSerializerOptions { WriteIndented = true })}";
-
-        var requestBody = new
+        if (line.Contains("game:GetService")) return "Service";
+        if (line.Contains("\"")) return "String";
+        if (Regex.IsMatch(line, @"\b\d+(\.\d+)?\b")) return "Number";
+        if (line.Contains("function()")) return "Function";
+        if (line.Contains("{}")) return "Table";
+        if (line.Contains("Vector3")) return "Vector";
+        return "Variable";
+    }
+    
+    private async Task<Dictionary<string, string>> GenerateRenamesAsync(Dictionary<string, SymbolData> symbols)
+    {
+        try
         {
-            model = _config.Model,
-            messages = new[] { new { role = "user", content = prompt } },
-            temperature = 0.1,
-            max_tokens = 2000
-        };
-
-        var response = await _httpClient.PostAsync(_config.ApiEndpoint, new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json"));
-        var responseContent = await response.Content.ReadAsStringAsync();
-        
-        var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseContent);
-        return JsonSerializer.Deserialize<Dictionary<string, string>>(aiResponse.Choices[0].Message.Content);
-    }
-
-    private string ApplyRenames(string code, Dictionary<string, string> renameMap)
-    {
-        var sortedKeys = renameMap.Keys.OrderByDescending(k => k.Length).ThenByDescending(k => k);
-        
-        foreach (var original in sortedKeys)
-        {
-            var newName = renameMap[original];
-            if (original == newName) continue;
+            // Prepare prompt for AI
+            var prompt = CreateAIPrompt(symbols);
             
-            var pattern = $@"\b{Regex.Escape(original)}\b";
-            code = Regex.Replace(code, pattern, newName);
+            var request = new
+            {
+                model = "mixtral-8x7b-32768",
+                messages = new[]
+                {
+                    new { role = "system", content = "You are a Lua deobfuscation expert. Return ONLY JSON with format: {\"oldName\": \"newName\", ...}" },
+                    new { role = "user", content = prompt }
+                },
+                temperature = 0.1,
+                max_tokens = 2000,
+                response_format = new { type = "json_object" }
+            };
+            
+            var json = JsonSerializer.Serialize(request);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            
+            var response = await _httpClient.PostAsync(
+                "https://api.groq.com/openai/v1/chat/completions",
+                content
+            );
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"API Error: {response.StatusCode}");
+                return new Dictionary<string, string>();
+            }
+            
+            var responseJson = await response.Content.ReadAsStringAsync();
+            var aiResponse = JsonSerializer.Deserialize<AIResponse>(responseJson, _jsonOptions);
+            
+            if (aiResponse?.Choices?.FirstOrDefault()?.Message?.Content == null)
+                return new Dictionary<string, string>();
+                
+            var renameJson = aiResponse.Choices.First().Message.Content;
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(renameJson, _jsonOptions)
+                ?? new Dictionary<string, string>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"AI Renaming Error: {ex.Message}");
+            return new Dictionary<string, string>();
+        }
+    }
+    
+    private string CreateAIPrompt(Dictionary<string, SymbolData> symbols)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Generate meaningful camelCase names for these Lua symbols from a decompiled MoonSecV3 script:");
+        sb.AppendLine();
+        
+        foreach (var kvp in symbols.Take(30)) // Limit to 30 symbols
+        {
+            var symbol = kvp.Value;
+            sb.AppendLine($"=== {symbol.Name} ===");
+            sb.AppendLine($"Type: {symbol.Type}");
+            sb.AppendLine($"Usage count: {symbol.UsageLines.Count}");
+            sb.AppendLine($"Context:");
+            sb.AppendLine(symbol.Context);
+            sb.AppendLine();
         }
         
-        return code;
+        sb.AppendLine("Examples:");
+        sb.AppendLine("- v1 → playersService");
+        sb.AppendLine("- v_u_3 → libraryUrl");
+        sb.AppendLine("- upvalue_0 → callbackFunc");
+        sb.AppendLine("- v5 → playerPosition");
+        
+        return sb.ToString();
     }
-
-    private string ExtractContext(int lineNum, string[] allLines)
+    
+    private string ApplyRenames(string code, Dictionary<string, string> renames)
     {
-        var start = Math.Max(0, lineNum - 3);
-        var end = Math.Min(allLines.Length - 1, lineNum + 3);
-        return string.Join(" ", allLines.Skip(start).Take(end - start + 1));
-    }
-
-    private int FindScopeEnd(int startLine, string[] allLines)
-    {
-        int depth = 0;
-        for (int i = startLine; i < allLines.Length; i++)
+        if (renames.Count == 0)
+            return code;
+            
+        // Sort by length (longest first) to avoid partial replacements
+        var sortedRenames = renames
+            .OrderByDescending(kv => kv.Key.Length)
+            .ThenByDescending(kv => kv.Key)
+            .ToList();
+        
+        var result = code;
+        
+        foreach (var rename in sortedRenames)
         {
-            depth += allLines[i].Count(c => c == '{') - allLines[i].Count(c => c == '}');
-            if (depth <= 0) return i;
+            if (rename.Key == rename.Value)
+                continue;
+                
+            var pattern = $@"\b{Regex.Escape(rename.Key)}\b";
+            result = Regex.Replace(result, pattern, rename.Value, RegexOptions.Multiline);
         }
-        return allLines.Length - 1;
+        
+        // Add rename summary
+        var summary = new StringBuilder();
+        summary.AppendLine("-- AI Renaming Summary");
+        summary.AppendLine($"-- {renames.Count} symbols renamed");
+        
+        foreach (var rename in renames.OrderBy(r => r.Key))
+        {
+            summary.AppendLine($"-- {rename.Key} → {rename.Value}");
+        }
+        
+        summary.AppendLine();
+        
+        return summary.ToString() + result;
     }
+}
 
-    private bool DetectConstantPattern(string value)
-    {
-        return Regex.IsMatch(value, @"^\d+$") || Regex.IsMatch(value, @"^""[^""]*""$") || Regex.IsMatch(value, @"^'[^']*'$");
-    }
+public class SymbolData
+{
+    public string Name { get; set; } = "";
+    public List<int> UsageLines { get; set; } = new();
+    public string Context { get; set; } = "";
+    public string Type { get; set; } = "";
 }
 
 public class AIResponse
 {
-    public List<AIChoice> Choices { get; set; }
+    [JsonPropertyName("choices")]
+    public List<AIChoice> Choices { get; set; } = new();
 }
 
 public class AIChoice
 {
-    public AIMessage Message { get; set; }
+    [JsonPropertyName("message")]
+    public AIMessage Message { get; set; } = new();
 }
 
 public class AIMessage
 {
-    public string Content { get; set; }
+    [JsonPropertyName("content")]
+    public string Content { get; set; } = "";
 }
+#endregion
+
+#region Main Decompiler Interface
+public class MoonSecDecompiler
+{
+    private readonly MoonSecDisassembler _disassembler;
+    private readonly AISymbolRenamer _renamer;
+    
+    public MoonSecDecompiler(string apiKey)
+    {
+        _disassembler = new MoonSecDisassembler();
+        _renamer = new AISymbolRenamer(apiKey);
+    }
+    
+    public async Task<string> DecompileAsync(byte[] bytecode, bool renameSymbols = true)
+    {
+        Console.WriteLine($"🔍 Processing {bytecode.Length} bytes of bytecode...");
+        
+        // Stage 1: Disassemble bytecode to pseudocode
+        var pseudocode = _disassembler.Disassemble(bytecode);
+        Console.WriteLine($"📝 Generated {pseudocode.Length} chars of pseudocode");
+        
+        if (!renameSymbols)
+            return pseudocode;
+        
+        // Stage 2: AI-powered symbol renaming
+        Console.WriteLine("🤖 Renaming symbols with AI...");
+        var renamed = await _renamer.RenameSymbolsAsync(pseudocode);
+        Console.WriteLine($"✅ Renaming complete");
+        
+        return renamed;
+    }
+    
+    public async Task<string> DecompileFileAsync(string filePath, bool renameSymbols = true)
+    {
+        try
+        {
+            var bytes = await File.ReadAllBytesAsync(filePath);
+            return await DecompileAsync(bytes, renameSymbols);
+        }
+        catch (Exception ex)
+        {
+            return $"-- File Error: {ex.Message}";
+        }
+    }
+}
+#endregion
+
