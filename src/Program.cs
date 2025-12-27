@@ -645,6 +645,7 @@ public class Program
         }
     }
 }
+#endregion
 
 #region Discord Commands Module
 [Group("deobfuscate", "Deobfuscate MoonSecV3 Lua bytecode")]
