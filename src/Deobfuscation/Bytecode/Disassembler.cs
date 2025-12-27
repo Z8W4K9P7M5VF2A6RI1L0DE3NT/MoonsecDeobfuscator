@@ -1,4 +1,3 @@
-#nullable disable
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,7 +12,6 @@ using System.IO;
 #region Disassembler Core
 public class MoonSecDisassembler
 {
-    // Lua 5.1 bytecode opcodes
     private enum OpCode
     {
         MOVE, LOADK, LOADBOOL, LOADNIL, GETUPVAL, GETGLOBAL, GETTABLE,
@@ -63,7 +61,6 @@ public class MoonSecDisassembler
     {
         var function = new Function();
         
-        // Simple bytecode parser for common patterns
         int pos = 0;
         
         while (pos < data.Length)
@@ -71,12 +68,11 @@ public class MoonSecDisassembler
             if (pos + 4 > data.Length) break;
             
             var opcode = data[pos];
-            if (opcode > 37) break; // Invalid opcode
+            if (opcode > 37) break;
             
             var instruction = new Instruction { OpCode = (OpCode)opcode };
             pos++;
             
-            // Parse instruction based on opcode
             switch (instruction.OpCode)
             {
                 case OpCode.MOVE:
@@ -131,7 +127,6 @@ public class MoonSecDisassembler
                         instruction.A = data[pos++];
                         instruction.Bx = BitConverter.ToUInt16(data, pos);
                         pos += 2;
-                        // Create child function placeholder
                         function.Functions.Add(new Function());
                     }
                     break;
@@ -140,7 +135,6 @@ public class MoonSecDisassembler
             function.Instructions.Add(instruction);
         }
         
-        // Add some placeholder constants
         function.Constants.Add(new StringConstant { Value = "game" });
         function.Constants.Add(new StringConstant { Value = "Players" });
         function.Constants.Add(new StringConstant { Value = "GetService" });
@@ -176,12 +170,10 @@ public class MoonSecDisassembler
             return "nil";
         }
         
-        // Generate function header
         sb.AppendLine("local function v1()");
         sb.AppendLine("  -- upvalues: (ref) v_u_3");
         sb.AppendLine();
         
-        // Process instructions
         foreach (var ins in function.Instructions)
         {
             switch (ins.OpCode)
@@ -266,17 +258,14 @@ public class AISymbolRenamer
     
     public async Task<string> RenameSymbolsAsync(string pseudocode)
     {
-        // Extract symbols
         var symbols = ExtractSymbolsWithContext(pseudocode);
         if (symbols.Count == 0)
             return pseudocode;
             
-        // Generate renames with AI
         var renames = await GenerateRenamesAsync(symbols);
         if (renames.Count == 0)
             return pseudocode;
             
-        // Apply renames
         return ApplyRenames(pseudocode, renames);
     }
     
@@ -285,7 +274,6 @@ public class AISymbolRenamer
         var symbols = new Dictionary<string, SymbolData>();
         var lines = code.Split('\n');
         
-        // Pattern for obfuscated identifiers
         var pattern = new Regex(@"\b(v\d+|v_u_\d+|upvalue_\d+)\b");
         
         for (int i = 0; i < lines.Length; i++)
@@ -339,7 +327,6 @@ public class AISymbolRenamer
     {
         try
         {
-            // Prepare prompt for AI
             var prompt = CreateAIPrompt(symbols);
             
             var request = new
@@ -392,7 +379,7 @@ public class AISymbolRenamer
         sb.AppendLine("Generate meaningful camelCase names for these Lua symbols from a decompiled MoonSecV3 script:");
         sb.AppendLine();
         
-        foreach (var kvp in symbols.Take(30)) // Limit to 30 symbols
+        foreach (var kvp in symbols.Take(30))
         {
             var symbol = kvp.Value;
             sb.AppendLine($"=== {symbol.Name} ===");
@@ -417,7 +404,6 @@ public class AISymbolRenamer
         if (renames.Count == 0)
             return code;
             
-        // Sort by length (longest first) to avoid partial replacements
         var sortedRenames = renames
             .OrderByDescending(kv => kv.Key.Length)
             .ThenByDescending(kv => kv.Key)
@@ -434,7 +420,6 @@ public class AISymbolRenamer
             result = Regex.Replace(result, pattern, rename.Value, RegexOptions.Multiline);
         }
         
-        // Add rename summary
         var summary = new StringBuilder();
         summary.AppendLine("-- AI Renaming Summary");
         summary.AppendLine($"-- {renames.Count} symbols renamed");
@@ -457,24 +442,6 @@ public class SymbolData
     public string Context { get; set; } = "";
     public string Type { get; set; } = "";
 }
-
-public class AIResponse
-{
-    [JsonPropertyName("choices")]
-    public List<AIChoice> Choices { get; set; } = new();
-}
-
-public class AIChoice
-{
-    [JsonPropertyName("message")]
-    public AIMessage Message { get; set; } = new();
-}
-
-public class AIMessage
-{
-    [JsonPropertyName("content")]
-    public string Content { get; set; } = "";
-}
 #endregion
 
 #region Main Decompiler Interface
@@ -493,14 +460,12 @@ public class MoonSecDecompiler
     {
         Console.WriteLine($"🔍 Processing {bytecode.Length} bytes of bytecode...");
         
-        // Stage 1: Disassemble bytecode to pseudocode
         var pseudocode = _disassembler.Disassemble(bytecode);
         Console.WriteLine($"📝 Generated {pseudocode.Length} chars of pseudocode");
         
         if (!renameSymbols)
             return pseudocode;
         
-        // Stage 2: AI-powered symbol renaming
         Console.WriteLine("🤖 Renaming symbols with AI...");
         var renamed = await _renamer.RenameSymbolsAsync(pseudocode);
         Console.WriteLine($"✅ Renaming complete");
@@ -522,4 +487,3 @@ public class MoonSecDecompiler
     }
 }
 #endregion
-
