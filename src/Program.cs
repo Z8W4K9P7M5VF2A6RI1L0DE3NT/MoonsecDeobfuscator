@@ -6,7 +6,6 @@ using System.Reflection;
 using System.Text;
 using System.Net;
 using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
 using System.Net.Http;
 using System.IO;
 using MoonsecDeobfuscator.Deobfuscation;
@@ -124,14 +123,12 @@ namespace MoonsecBot
         {
             await DeferAsync();
 
-            // Validate file type
             if (!file.Filename.EndsWith(".lua") && !file.Filename.EndsWith(".txt"))
             {
                 await FollowupAsync("❌ Only `.lua` or `.txt` files are supported.");
                 return;
             }
 
-            // Validate file size (10MB limit)
             if (file.Size > 10 * 1024 * 1024)
             {
                 await FollowupAsync("❌ File too large. Maximum size is 10MB.");
@@ -145,14 +142,11 @@ namespace MoonsecBot
                 using var http = new HttpClient();
                 var luaCode = await http.GetStringAsync(file.Url);
                 
-                // Deobfuscate and decompile through external API
                 var decompiledCode = await _service.DeobfuscateAndDecompileAsync(luaCode);
                 
-                // Generate random hex filename
                 string randomHex = Guid.NewGuid().ToString("N").Substring(0, 16);
                 string customFilename = $"{randomHex}.lua";
                 
-                // Send result as file
                 await FollowupWithFileAsync(
                     new MemoryStream(Encoding.UTF8.GetBytes(decompiledCode)),
                     customFilename,
@@ -186,74 +180,39 @@ namespace MoonsecBot
             _apiEndpoint = Environment.GetEnvironmentVariable("DECOMPILER_API_ENDPOINT") 
                            ?? "https://henne4g.onrender.com/decompile";
             
-            // Use the fixed API key
             _apiKey = Environment.GetEnvironmentVariable("DECOMPILER_API_KEY") 
                       ?? "medal-bot-secure-key-2025";
             
-            // Set timeout
             _httpClient.Timeout = TimeSpan.FromSeconds(60);
         }
 
         public async Task<string> DeobfuscateAndDecompileAsync(string luaCode)
         {
-            Console.WriteLine("🔄 Starting hybrid deobfuscation process...");
+            Console.WriteLine("🔄 Starting hybrid deobfuscation...");
             
-            // Step 1: Deobfuscate using MoonsecDeobfuscator
-            Console.WriteLine("⚙️  Running local deobfuscator...");
-            var deobfuscationResult = new Deobfuscator().Deobfuscate(luaCode);
-            Console.WriteLine("✅ Deobfuscation complete");
+            var deob = new Deobfuscator().Deobfuscate(luaCode);
             
-            // Step 2: Serialize to bytecode
-            Console.WriteLine("💾 Serializing bytecode...");
-            using var memoryStream = new MemoryStream();
-            using var serializer = new Serializer(memoryStream);
-            serializer.Serialize(deobfuscationResult);
-            var bytecode = memoryStream.ToArray();
-            Console.WriteLine($"📦 Serialized {bytecode.Length} bytes of bytecode");
+            using var ms = new MemoryStream();
+            new Serializer(ms).Serialize(deob);
+            var bytecode = ms.ToArray();
             
-            // Step 3: Send to external decompiler API
-            Console.WriteLine($"🌐 Sending to decompiler API...");
-            return await SendToDecompilerApiAsync(bytecode);
+            Console.WriteLine($"📦 Serialized {bytecode.Length} bytes");
+            
+            return await SendToApiAsync(bytecode);
         }
 
-        private async Task<string> SendToDecompilerApiAsync(byte[] bytecode)
+        private async Task<string> SendToApiAsync(byte[] bytecode)
         {
-            try
-            {
-                // Convert to base64
-                string base64Data = Convert.ToBase64String(bytecode);
-                
-                // Create request
-                var request = new HttpRequestMessage(HttpMethod.Post, _apiEndpoint);
-                request.Headers.Add("X-API-Key", _apiKey);
-                request.Content = new StringContent(base64Data, Encoding.UTF8, "application/octet-stream");
-                
-                Console.WriteLine($"📤 POST {_apiEndpoint} ({base64Data.Length} bytes)");
-                
-                // Send request
-                var response = await _httpClient.SendAsync(request);
-                
-                // Handle response
-                if (!response.IsSuccessStatusCode)
-                {
-                    var errorContent = await response.Content.ReadAsStringAsync();
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"❌ API Error: {response.StatusCode} - {errorContent}");
-                    Console.ResetColor();
-                    throw new Exception($"Decompiler API returned {response.StatusCode}: {errorContent}");
-                }
-                
-                var decompiledCode = await response.Content.ReadAsStringAsync();
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"✅ Decompilation successful! ({decompiledCode.Length} chars)");
-                Console.ResetColor();
-                
-                return decompiledCode;
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"External decompiler failed: {ex.Message}", ex);
-            }
+            var base64Data = Convert.ToBase64String(bytecode);
+            
+            var req = new HttpRequestMessage(HttpMethod.Post, _apiEndpoint);
+            req.Headers.Add("X-API-Key", _apiKey);
+            req.Content = new StringContent(base64Data, Encoding.UTF8, "application/octet-stream");
+            
+            var resp = await _httpClient.SendAsync(req);
+            resp.EnsureSuccessStatusCode();
+            
+            return await resp.Content.ReadAsStringAsync();
         }
     }
 }
